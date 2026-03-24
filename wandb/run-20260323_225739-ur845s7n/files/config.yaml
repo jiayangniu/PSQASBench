@@ -1,0 +1,120 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            0knqcyly987ltiqs2ntqoozc18ilo8qa:
+                codePath: main.py
+                codePathLocal: main.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "132011507712"
+                        used: "31256207360"
+                email: jiayangniu14@gmail.com
+                executable: /home/ubuntu/miniconda3/envs/crlqas_env/bin/python
+                git:
+                    commit: 355e2c92e0401784f9bdab9112b432595a129251
+                    remote: https://github.com/jiayangniu/PSQASBench.git
+                gpu: NVIDIA L4
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 7424
+                      memoryTotal: "24152899584"
+                      name: NVIDIA L4
+                      uuid: GPU-eeffeb33-b3a6-6e5c-7d1a-898bd6074c44
+                host: ip-10-0-12-149
+                memory:
+                    total: "130090557440"
+                os: Linux-6.17.0-1007-aws-x86_64-with-glibc2.39
+                program: /home/ubuntu/NeurIPS2026/PSQASBench/main.py
+                python: CPython 3.10.20
+                root: /home/ubuntu/NeurIPS2026/PSQASBench
+                startedAt: "2026-03-23T22:57:39.489236Z"
+                writerId: 0knqcyly987ltiqs2ntqoozc18ilo8qa
+        m:
+            - "1": episode
+              "6":
+                - 3
+              "7": []
+            - "2": '*'
+              "5": 1
+              "6":
+                - 1
+              "7": []
+        python_version: 3.10.20
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 7
+                - 13
+                - 16
+            "4": 3.10.20
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+agent:
+    value:
+        agent_class: DQN_Nstep
+        agent_type: DeepQNstep
+        angles: 0
+        batch_size: 1000
+        dropout: 0
+        en_state: 1
+        epsilon_decay: 0.99995
+        epsilon_min: 0.05
+        epsilon_restart: 1
+        final_gamma: 0.005
+        init_net: 0
+        learning_rate: 0.0001
+        memory_size: 20000
+        n_step: 6
+        neurons:
+            - 1000
+            - 1000
+            - 1000
+            - 1000
+            - 1000
+        update_target_net: 500
+env:
+    value:
+        accept_err: 0.0016
+        curriculum_type: MovingThreshold
+        err_mitig: 0
+        fake_min_energy: -1.13726839
+        fn_type: incremental_with_fixed_ends
+        n_shots: 0
+        noise_models: 0
+        noise_values: 0
+        num_layers: 10
+        num_qubits: 4
+        rand_halt: 1
+        shift_threshold_ball: 0.001
+        shift_threshold_time: 200
+        succ_radius_shift: 10
+        succes_switch: 0.5
+        success_thresh: 10
+        switch_episodes: []
+        thresholds: []
+general:
+    value:
+        episodes: 10000
+non_local_opt:
+    value:
+        global_iters: 1000
+        local_size: 8
+        maxfev: 2000
+        method: scipy_each_step
+        optim_alg: COBYLA
+problem:
+    value:
+        geometry: H .0 .0 0.0; H .0 .0 0.735
+        ham_type: L1_H2_Equil
+        mapping: jordan_wigner
+        mol_data_dir: /home/ubuntu/NeurIPS2026/PSQASBench/mol_data
+        mol_file: L1_H2_Equil_4q_geom_H_.0_.0_0.0;_H_.0_.0_0.735_jordan_wigner.npz

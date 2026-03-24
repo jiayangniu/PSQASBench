@@ -38,12 +38,14 @@ MOL_FILES = {
 
 # ── Stdout redirection ────────────────────────────────────────────────────────
 
-def redirect_stdout(file_path: Path):
-    """Redirect stdout to a file. Returns the file object for later closing."""
+def redirect_output(file_path: Path):
+    """Redirect both stdout and stderr to a file. Returns the file object for later closing."""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(file_path, "w", buffering=1, encoding="utf-8")
     sys.stdout = log
+    sys.stderr = log
     return log
+
 
 
 # ── Interactive prompts ───────────────────────────────────────────────────────
@@ -79,17 +81,17 @@ def prompt_args() -> dict:
     method = choose("Select method", METHODS)
     mol    = choose("Select mol",    MOL_KEYS)
 
-    raw_seeds = choose("Seeds (space-separated integers, e.g. 11111 22222; default 11111)")
+    raw_seed = choose("Seed (integer, e.g. 11111; default 11111)")
     try:
-        seeds = [int(s) for s in raw_seeds.split()] if raw_seeds else [11111]
+        seed = int(raw_seed) if raw_seed else 11111
     except ValueError:
         print("  Invalid format, using default seed 11111")
-        seeds = [11111]
+        seed = 11111
 
     device = choose("Select GPU", GPU_OPTS)
 
     config_name = f"{mol}.cfg"
-    return dict(method=method, mol=mol, seeds=seeds, device=device,
+    return dict(method=method, mol=mol, seed=seed, device=device,
                 config=config_name)
 
 
