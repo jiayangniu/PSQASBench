@@ -6,3 +6,8 @@ mol_gen/molecular_fingerprints_full.csv
 *.log
 *.pdf
 *.out
+
+# Large data files
+*.npz
+*.npy
+*.h5
