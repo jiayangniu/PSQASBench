@@ -88,6 +88,21 @@ class SuccesCountThreshold:
             self.greedy_shift()
 
 
+class FixedThreshold:
+    """No curriculum: threshold stays fixed at accept_err throughout training."""
+
+    def __init__(self, config, **kw):
+        self.min_en            = kw.get("target_energy")
+        self.current_threshold = config["accept_err"]
+        self.lowest_energy     = self.min_en + self.current_threshold
+
+    def get_current_threshold(self):
+        return self.current_threshold
+
+    def update_threshold(self, **kw):
+        pass   # never changes
+
+
 class VanillaCurriculum:
     def __init__(self, config, **kw):
         self.thresholds           = config["thresholds"]

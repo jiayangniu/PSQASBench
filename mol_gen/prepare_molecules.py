@@ -60,7 +60,17 @@ def generate_mol_data_for_rl(mol_name, symbols, coordinates_angstrom,
 # =================================================================
 
 # --- L1: Minimalism ---
-# L1_H2_Equil (4q) and L1_BH (6q) already generated; skipped here.
+geom_h2_equil = "H .0 .0 0.0; H .0 .0 0.735"
+generate_mol_data_for_rl(
+    "L1_H2_Equil", ["H", "H"], np.array([[0,0,0],[0,0,0.735]]),
+    2, 2, geometry_str=geom_h2_equil
+)
+
+geom_bh = "B .0 .0 0.0; H .0 .0 1.232"
+generate_mol_data_for_rl(
+    "L1_BH", ["B", "H"], np.array([[0,0,0],[0,0,1.232]]),
+    2, 3, geometry_str=geom_bh
+)
 
 # --- L2: Asymmetry ---
 geom_beh_plus = "Be .0 .0 0.0; H .0 .0 1.312"

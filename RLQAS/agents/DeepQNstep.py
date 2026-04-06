@@ -70,7 +70,10 @@ class N_step_ReplayMemory:
             return
         reward, n_state, done = self._n_step_return()
         state, action         = self.n_step_memory[0][:2]
-        self.memory.append(self.Transition(state, action, reward[0], n_state, done))
+        # reward can be 0-d tensor (scalar) or length-1 tensor depending on caller.
+        # Keep a scalar tensor for replay stacking while avoiding shape-index errors.
+        reward_scalar = reward.reshape(-1)[0] if hasattr(reward, "reshape") else reward
+        self.memory.append(self.Transition(state, action, reward_scalar, n_state, done))
 
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)

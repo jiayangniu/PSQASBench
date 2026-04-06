@@ -4,3 +4,5 @@ __pycache__/
 results/
 mol_gen/molecular_fingerprints_full.csv
 *.log
+*.pdf
+*.out

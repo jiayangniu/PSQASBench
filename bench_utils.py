@@ -2,6 +2,7 @@
 PSQASBench top-level utilities
 """
 
+import argparse
 import sys
 from pathlib import Path
 import torch
@@ -26,6 +27,7 @@ MOL_FILES = {
     "L3_HeH_Plus_4q":       "L3_HeH_Plus_4q_geom_He_.0_.0_0.0;_H_.0_.0_0.774_jordan_wigner.npz",
     "L3_CH2_Singlet_6q":    "L3_CH2_Singlet_6q_geom_C_.0_.0_0.0;_H_.0_0.86_0.73;_H_.0_-0.86_0.73_jordan_wigner.npz",
     "L3_LiH_Stretch_6q":    "L3_LiH_Stretch_6q_geom_Li_.0_.0_0.0;_H_.0_.0_3.500_jordan_wigner.npz",
+    "LiH_6q_2p2":           "LiH_6q_geom_Li_.0_.0_.0;_H_.0_.0_2.2_jordan_wigner.npz",
     "L3_H3_Triangle_6q":    "L3_H3_Triangle_6q_geom_H_.0_.0_0.0;_H_1.0_.0_0.0;_H_0.5_0.866_0.0_jordan_wigner.npz",
     "L4_H2_Stretch_4q":     "L4_H2_Stretch_4q_geom_H_.0_.0_0.0;_H_.0_.0_2.5_jordan_wigner.npz",
     "L4_H3_Linear_6q":      "L4_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz",
@@ -48,51 +50,50 @@ def redirect_output(file_path: Path):
 
 
 
-# ── Interactive prompts ───────────────────────────────────────────────────────
+# ── Argument parsing ──────────────────────────────────────────────────────────
 
-def choose(prompt: str, options: list | None = None, default_idx: int = 0) -> str:
-    """Unified interactive input.
+METHODS = ["crlqas", "hyrlqas"]
+METHOD_CONFIG_DIR = {
+    "crlqas": "crlqas",
+    "hyrlqas": "hyrlqas",
+}
 
-    - options is not None: display a numbered menu and return the selected value.
-    - options is None: read a free-form line and return the raw string (may be empty).
+
+def parse_args() -> dict:
     """
-    print(f"\n{prompt}")
-    if options is None:
-        return input("> ").strip()
+    Parse command-line arguments.  All four flags are required so the script
+    can be launched non-interactively (nohup, screen, SLURM, etc.).
 
-    for i, opt in enumerate(options):
-        marker = " #" if i == default_idx else ""
-        print(f"  [{i}] {opt}{marker}")
-    while True:
-        raw = input(f"Select [default {default_idx}]: ").strip()
-        if raw == "":
-            return options[default_idx]
-        if raw.isdigit() and 0 <= int(raw) < len(options):
-            return options[int(raw)]
-        print(f"  Please enter a number between 0 and {len(options) - 1}")
-
-
-def prompt_args() -> dict:
-    """Collect all interactive inputs and return an args dict."""
-    METHODS  = ["crlqas"]
+    Usage:
+        python main.py --method crlqas  --mol L1_H2_Equil_4q --seed 11111 --device cuda:0
+        python main.py --method hyrlqas --mol L1_H2_Equil_4q --seed 11111 --device cuda:0
+        python main.py --method crlqas --mol LiH_6q_2p2 --config LiH_6q_2p2_cobyla.cfg --seed 11111 --device cuda:0
+    """
     MOL_KEYS = list(MOL_FILES.keys())
-    GPU_OPTS = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
-    method = choose("Select method", METHODS)
-    mol    = choose("Select mol",    MOL_KEYS)
+    parser = argparse.ArgumentParser(
+        prog="PSQASBench",
+        description="Principled benchmark for RL-based Quantum Architecture Search.",
+    )
+    parser.add_argument("--method", required=True, choices=METHODS,
+                        help=f"QAS method to run. Choices: {METHODS}")
+    parser.add_argument("--mol",    required=True, choices=MOL_KEYS,
+                        help="Molecule key (see bench_utils.MOL_FILES)")
+    parser.add_argument("--config", required=False,
+                        help="Config filename inside configs/<method>/; defaults to <mol>.cfg")
+    parser.add_argument("--seed",   required=True, type=int,
+                        help="Random seed (e.g. 11111)")
+    parser.add_argument("--device", required=True,
+                        help="Torch device string (e.g. cuda:0, cpu)")
 
-    raw_seed = choose("Seed (integer, e.g. 11111; default 11111)")
-    try:
-        seed = int(raw_seed) if raw_seed else 11111
-    except ValueError:
-        print("  Invalid format, using default seed 11111")
-        seed = 11111
-
-    device = choose("Select GPU", GPU_OPTS)
-
-    config_name = f"{mol}.cfg"
-    return dict(method=method, mol=mol, seed=seed, device=device,
-                config=config_name)
+    args = parser.parse_args()
+    return dict(
+        method=args.method,
+        mol=args.mol,
+        seed=args.seed,
+        device=args.device,
+        config=(args.config if args.config else f"{args.mol}.cfg"),
+    )
 
 
 # ── Runner factory ────────────────────────────────────────────────────────────
@@ -102,4 +103,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
     if method == "crlqas":
         from RLQAS import CRLQASRunner
         return CRLQASRunner(config_path, mol_path, result_dir, seed, device)
-    raise ValueError(f"Unknown method '{method}'. Implemented so far: crlqas")
+    if method == "hyrlqas":
+        from RLQAS import HyRLQASRunner
+        return HyRLQASRunner(config_path, mol_path, result_dir, seed, device)
+    raise ValueError(f"Unknown method '{method}'. Implemented so far: {METHODS}")

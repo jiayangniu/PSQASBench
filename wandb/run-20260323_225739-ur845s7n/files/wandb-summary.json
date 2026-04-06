@@ -1,1 +1,0 @@
-{"global_best/energy":-1.1373060355762585,"_timestamp":1.7743076394473493e+09,"global_best/energy_error":3.9764458392710367e-07,"train/policy_loss":0.1839753667100331,"_runtime":978,"train/reward_accumulate":6.636233221313535,"_step":65726,"episode":6832,"_wandb":{"runtime":978},"train/episode_energy":-1.1373060312684506}

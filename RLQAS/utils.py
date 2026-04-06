@@ -41,6 +41,37 @@ def dictionary_of_actions(num_qubits):
     return d
 
 
+def dictionary_of_actions_linear(num_qubits):
+    """Maps integer action index → 4-tuple [ctrl, offset, rot_qubit, rot_axis].
+    Only nearest-neighbour CNOT gates (open chain, no wrap-around):
+      ctrl → ctrl+1  (offset=1,           ctrl in 0..N-2)
+      ctrl → ctrl-1  (offset=num_qubits-1, ctrl in 1..N-1)
+    Rotation gates are unrestricted (all qubits × all axes).
+    """
+    d = {}
+    i = 0
+    for c in range(num_qubits - 1):          # forward edges: ctrl → ctrl+1
+        d[i] = [c, 1, num_qubits, 0]
+        i += 1
+    for c in range(1, num_qubits):           # backward edges: ctrl → ctrl-1
+        d[i] = [c, num_qubits - 1, num_qubits, 0]
+        i += 1
+    for r, h in product(range(num_qubits), range(1, 4)):
+        d[i] = [num_qubits, 0, r, h]
+        i += 1
+    return d
+
+
+def get_action_dict(num_qubits, connectivity='all'):
+    """Factory: return action dictionary for given connectivity.
+    connectivity='all'    → all-to-all CNOT (default)
+    connectivity='linear' → 1D nearest-neighbor open chain
+    """
+    if connectivity == 'linear':
+        return dictionary_of_actions_linear(num_qubits)
+    return dictionary_of_actions(num_qubits)
+
+
 def dict_of_actions_revert_q(num_qubits):
     """Same as above but with reversed qubit ordering."""
     d = {}
@@ -78,17 +109,19 @@ def get_config(cfg_path: str, verbose: bool = False) -> dict:
         "memory_reset_threshold", "fake_min_energy", "_true_en",
         "n_shots", "err_mitig", "rand_halt",
         "a", "gamma", "c", "lamda", "beta_1", "beta_2",
+        "refine_dropout", "delta_max", "refine_entropy_coef",
         "maxfev", "maxfev1", "maxfev2", "maxfev3",
     }
     _STRINGS = {
         "ham_type", "fn_type", "geometry", "method", "agent_type",
         "agent_class", "init_seed", "init_path", "init_thresh",
         "mapping", "optim_alg", "curriculum_type", "mol_file", "mol_data_dir",
+        "connectivity", "refine_mode",
     }
     _LISTS = {
         "episodes", "neurons", "accept_err", "epsilon_decay", "epsilon_min",
         "final_gamma", "memory_clean", "update_target_net", "epsilon_restart",
-        "thresholds", "switch_episodes",
+        "thresholds", "switch_episodes", "refine_neurons",
     }
 
     config_dict = {}
@@ -121,6 +154,17 @@ def get_config(cfg_path: str, verbose: bool = False) -> dict:
 
 
 # ── Qulacs Observable builder ─────────────────────────────────────────────────
+
+def map_theta(x) -> float:
+    """Normalize angle to [-π, π]."""
+    import math
+    if hasattr(x, "item"):   # tensor scalar
+        x = x.item()
+    x = float(x) % (2 * math.pi)
+    if x > math.pi:
+        x -= 2 * math.pi
+    return x
+
 
 def build_observable(weights, pauli_strings, num_qubits) -> Observable:
     """Build a qulacs Observable from Pauli weights and string labels."""

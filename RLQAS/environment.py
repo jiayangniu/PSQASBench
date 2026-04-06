@@ -19,19 +19,15 @@ import scipy.optimize
 import torch
 from qulacs import ParametricQuantumCircuit
 from qulacs.gate import CNOT, RX, RY, RZ
-try:
-    from qulacs import QuantumStateGpu as QuantumState
-except ImportError:
-    from qulacs import QuantumState
 
 from . import VQE as vc
 from . import curricula
-from .utils import dictionary_of_actions, to_tuple4
+from .utils import get_action_dict, to_tuple4
 
 
 class CircuitEnv:
 
-    def __init__(self, conf, device):
+    def __init__(self, conf, device, use_gpu_state: bool = True):
         self.num_qubits    = conf["env"]["num_qubits"]
         self.num_layers    = conf["env"]["num_layers"]
         self.random_halt   = int(conf["env"]["rand_halt"])
@@ -52,6 +48,7 @@ class CircuitEnv:
         self.ham_mapping   = conf["problem"]["mapping"]
         self.geometry      = conf["problem"]["geometry"].replace(" ", "_")
         self.mol           = conf["problem"]["ham_type"]
+        self._loaded_bond_distance = self.geometry[-3:]
 
         self.fake_min_energy = conf["env"].get("fake_min_energy", None)
         self.fn_type         = conf["env"]["fn_type"]
@@ -84,7 +81,27 @@ class CircuitEnv:
         ](conf["env"], target_energy=min_eig)
 
         self.device = device
-        self.ket    = QuantumState(self.num_qubits)
+        # use_gpu_state=False forces CPU QuantumState even when QuantumStateGpu
+        # is available.  Parallel envs must use CPU to avoid CUDA-stream
+        # contention (K threads sharing the default stream would serialize).
+        _QS = vc.QuantumStateGPU if use_gpu_state else vc.QuantumStateCPU
+        self.ket = _QS(self.num_qubits)
+
+        # BatchedVQE always runs on GPU (if available) regardless of use_gpu_state.
+        # The state vector and H are tiny for 4-8 qubits; GPU matmul batches all
+        # Rotosolve probes in one kernel launch instead of N sequential Qulacs calls.
+        if isinstance(self.device, torch.device):
+            _runner_dev = self.device
+        else:
+            _runner_dev = torch.device(self.device)
+        if _runner_dev.type == "cuda" and torch.cuda.is_available():
+            _bvqe_dev = _runner_dev
+        else:
+            _bvqe_dev = torch.device("cpu")
+        self._batched_vqe = vc.BatchedVQE(
+            self.num_qubits, self.hamiltonian, self.energy_shift, _bvqe_dev
+        )
+
         self.done_threshold = conf["env"]["accept_err"]
 
         self.op_history    = []
@@ -95,13 +112,16 @@ class CircuitEnv:
         self.moments       = [0] * self.num_qubits
         self.illegal_actions = [[]] * self.num_qubits
         self.energy        = 0
-        self.action_size   = self.num_qubits * (self.num_qubits + 2)
+        connectivity = conf["env"].get("connectivity", "all")
+        self.action_dict = get_action_dict(self.num_qubits, connectivity)
+        self.action_size = len(self.action_dict)
         self.previous_action = [0, 0, 0, 0]
 
         if "non_local_opt" in conf:
             self.global_iters  = conf["non_local_opt"]["global_iters"]
             self.optim_method  = conf["non_local_opt"]["method"]
             self.optim_alg     = conf["non_local_opt"]["optim_alg"]
+            self.rotosolve_sweeps = int(conf["non_local_opt"].get("rotosolve_sweeps", 1))
             if "maxfev" in conf["non_local_opt"]:
                 self.maxfev = {"maxfev": int(conf["non_local_opt"]["maxfev"])}
             if "maxfev1" in conf["non_local_opt"]:
@@ -113,14 +133,10 @@ class CircuitEnv:
             if "a" in conf["non_local_opt"]:
                 self.options = {
                     "a": conf["non_local_opt"]["a"],
-                    "alpha": conf["non_local_opt"]["alpha"],
-                    "c": conf["non_local_opt"]["c"],
-                    "gamma": conf["non_local_opt"]["gamma"],
-                    "beta_1": conf["non_local_opt"]["beta_1"],
-                    "beta_2": conf["non_local_opt"]["beta_2"],
                 }
-                if "lamda" in conf["non_local_opt"]:
-                    self.options["lamda"] = conf["non_local_opt"]["lamda"]
+                for key in ("alpha", "c", "gamma", "beta_1", "beta_2", "lamda"):
+                    if key in conf["non_local_opt"]:
+                        self.options[key] = conf["non_local_opt"][key]
         else:
             self.global_iters = 0
             self.optim_method = None
@@ -129,7 +145,7 @@ class CircuitEnv:
 
     # ── step ──────────────────────────────────────────────────────────────────
 
-    def step(self, action, train_flag=True):
+    def _apply_action_and_optimize(self, action, run_optimizer=True):
         next_state   = self.state.clone()
         self.step_counter += 1
 
@@ -164,14 +180,23 @@ class CircuitEnv:
         self.current_action = action
         self.illegal_action_new()
 
-        if self.optim_method == "scipy_each_step":
-            thetas, nfev, opt_ang = self.scipy_optim(self.optim_alg)
+        if run_optimizer and self.optim_method == "scipy_each_step":
+            # Update self.state first so the optimiser sees the newly added gate.
+            self.state = next_state.clone()
+            if self.optim_alg == "Rotosolve":
+                thetas, nfev, opt_ang = self.rotosolve_optim()
+            elif str(self.optim_alg).upper() in {"SPSA", "ADAMSPSA"}:
+                thetas, nfev, opt_ang = self.spsa_optim(self.optim_alg)
+            else:
+                thetas, nfev, opt_ang = self.scipy_optim(self.optim_alg)
             for i in range(self.num_layers):
                 for j in range(3):
                     next_state[i][self.num_qubits + 3 + j, :] = thetas[i][j, :]
 
         self.state  = next_state.clone()
-        energy, energy_noiseless = self.get_energy()
+        return next_state
+
+    def _finalize_step(self, action, next_state, energy, energy_noiseless, train_flag=True):
         if not self.noise_flag:
             energy = energy_noiseless
 
@@ -208,6 +233,26 @@ class CircuitEnv:
                     torch.tensor(rwd, dtype=torch.float32, device=self.device),
                     done, done_reason)
 
+    def step(self, action, train_flag=True):
+        next_state = self._apply_action_and_optimize(action, run_optimizer=True)
+        energy, energy_noiseless = self.get_energy()
+        return self._finalize_step(
+            action, next_state, energy=energy, energy_noiseless=energy_noiseless, train_flag=train_flag
+        )
+
+    def step_deferred_energy(self, action, run_optimizer=True):
+        """Apply action + optimiser and update self.state, but defer energy eval.
+
+        Used by parallel runner to evaluate multiple env energies on GPU together.
+        """
+        return self._apply_action_and_optimize(action, run_optimizer=run_optimizer)
+
+    def finalize_step_with_energy(self, action, next_state, energy, energy_noiseless, train_flag=True):
+        """Finalize reward/done bookkeeping using externally computed energies."""
+        return self._finalize_step(
+            action, next_state, energy=energy, energy_noiseless=energy_noiseless, train_flag=train_flag
+        )
+
     # ── reset ─────────────────────────────────────────────────────────────────
 
     def reset(self):
@@ -224,7 +269,6 @@ class CircuitEnv:
         self.current_action          = [self.num_qubits] * 4
         self.illegal_actions         = [[]] * self.num_qubits
 
-        self.make_circuit(state)
         self.step_counter = -1
         self.moments      = [0] * self.num_qubits
 
@@ -233,15 +277,20 @@ class CircuitEnv:
         self.done_threshold = copy.deepcopy(self.curriculum.get_current_threshold())
         self.geometry       = self.geometry[:-3] + str(self.current_bond_distance)
 
-        # reload mol data (same file — path is fixed at init time)
-        __ham = np.load(self._mol_path, allow_pickle=True)
-        self.hamiltonian  = __ham["hamiltonian"]
-        self.weights      = __ham["weights"]
-        eigvals           = __ham["eigvals"]
-        self.energy_shift = float(__ham["energy_shift"])
-        self.min_eig      = (self.fake_min_energy if self.fake_min_energy is not None
-                             else float(min(eigvals)) + self.energy_shift)
-        self.max_eig      = float(max(eigvals)) + self.energy_shift
+        # Reload only when bond-distance key changed (single-molecule runs avoid
+        # redundant disk I/O and GPU tensor re-init every episode).
+        if self.current_bond_distance != self._loaded_bond_distance:
+            __ham = np.load(self._mol_path, allow_pickle=True)
+            self.hamiltonian  = __ham["hamiltonian"]
+            self.weights      = __ham["weights"]
+            eigvals           = __ham["eigvals"]
+            self.energy_shift = float(__ham["energy_shift"])
+            self._batched_vqe.set_problem(self.hamiltonian, self.energy_shift)
+            self.min_eig      = (self.fake_min_energy if self.fake_min_energy is not None
+                                 else float(min(eigvals)) + self.energy_shift)
+            self.min_energy   = float(min(eigvals)) + self.energy_shift
+            self.max_eig      = float(max(eigvals)) + self.energy_shift
+            self._loaded_bond_distance = self.current_bond_distance
         self.prev_energy  = self.get_energy(state)[1]
 
         if self.state_with_angles:
@@ -276,14 +325,19 @@ class CircuitEnv:
     # ── energy evaluation ─────────────────────────────────────────────────────
 
     def get_energy(self, thetas=None):
-        circ         = self.make_circuit(thetas)
-        qulacs_inst  = vc.Parametric_Circuit(self.num_qubits, self.noise_models, self.noise_values)
-        noisy_circ   = qulacs_inst.construct_ansatz(self.state)
-        expval_noisy     = vc._get_exp_val(self.num_qubits, noisy_circ, self.hamiltonian, self.phys_noise, self.err_mitig)
-        expval_noiseless = vc._get_exp_val(self.num_qubits, circ, self.hamiltonian)
-        shot_noise       = vc._get_shot_noise(self.weights, self.n_shots)
-        energy           = expval_noisy + shot_noise + self.energy_shift
+        circ             = self.make_circuit(thetas)
+        expval_noiseless = vc._get_exp_val(self.num_qubits, circ, self.hamiltonian,
+                                           state=self.ket)
         energy_noiseless = expval_noiseless + self.energy_shift
+        shot_noise       = vc._get_shot_noise(self.weights, self.n_shots)
+        if self.phys_noise:
+            qulacs_inst = vc.Parametric_Circuit(self.num_qubits, self.noise_models, self.noise_values)
+            noisy_circ  = qulacs_inst.construct_ansatz(self.state)
+            expval_noisy = vc._get_exp_val(self.num_qubits, noisy_circ, self.hamiltonian,
+                                           phys_noise=True, err_mitig=self.err_mitig)
+            energy       = expval_noisy + shot_noise + self.energy_shift
+        else:
+            energy = energy_noiseless + shot_noise
         return energy, energy_noiseless
 
     # ── scipy optimiser ───────────────────────────────────────────────────────
@@ -304,6 +358,7 @@ class CircuitEnv:
                 circuit=qulacs_circuit, n_qubits=self.num_qubits,
                 energy_shift=self.energy_shift, n_shots=int(self.n_shots),
                 phys_noise=self.phys_noise,
+                state=self.ket,
             )
 
         result = scipy.optimize.minimize(
@@ -314,11 +369,136 @@ class CircuitEnv:
         thetas[rot_pos] = torch.tensor(result["x"], dtype=torch.float)
         return thetas, result["nfev"], result["x"]
 
+    # ── Rotosolve optimiser ────────────────────────────────────────────────────
+
+    def rotosolve_optim(self):
+        """Rotosolve angle optimisation — drop-in replacement for scipy_optim.
+
+        For each rotation parameter θ_i in sequence, evaluates E at θ_i ∈
+        {0, π/2, π} with all other parameters fixed, fits the model
+            E(θ_i) = A·cos(θ_i) + B·sin(θ_i) + C
+        and sets θ_i to its analytical minimum atan2(−B, −A).
+        Repeats for self.rotosolve_sweeps full sweeps over all parameters.
+
+        Returns (thetas, nfev, opt_angles) — identical interface to scipy_optim.
+        """
+        state    = self.state.clone()
+        thetas   = state[:, self.num_qubits + 3:]
+        rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=float)
+        n_params = len(angles)
+
+        if n_params == 0:
+            return thetas, 0, angles
+
+        bvqe     = self._batched_vqe
+        bdev     = bvqe.device
+        n_probes = 3 * n_params       # total probe configs per sweep
+
+        # Probe values for Rotosolve: {0, π/2, π}
+        probe_vals = np.array([0.0, np.pi / 2.0, np.pi], dtype=np.float32)
+        nfev = 0
+
+        for _ in range(self.rotosolve_sweeps):
+            # Build probe angle matrix (n_probes, n_params) in one NumPy op.
+            # Row 3i+p: identical to current angles except angles[i] = probe_vals[p].
+            probe_matrix = np.tile(angles.astype(np.float32), (n_probes, 1))
+            for i in range(n_params):
+                probe_matrix[3*i : 3*i+3, i] = probe_vals
+
+            angle_t  = torch.tensor(probe_matrix, device=bdev)        # (n_probes, n_params)
+            energies = bvqe.eval_batch(state.to(bdev), angle_t).cpu().numpy()
+            nfev    += n_probes
+
+            # Analytical minimum for each parameter
+            for i in range(n_params):
+                e0, epi2, epi = energies[3*i], energies[3*i+1], energies[3*i+2]
+                A = (e0 - epi) / 2.0
+                C = (e0 + epi) / 2.0
+                B = epi2 - C
+                angles[i] = float(np.arctan2(-B, -A))
+
+        thetas[rot_pos] = torch.tensor(angles, dtype=torch.float)
+        return thetas, nfev, angles
+
+    def spsa_optim(self, method="SPSA"):
+        """SPSA-style optimiser with optional Adam preconditioning.
+
+        Supported method names:
+          - ``SPSA``: vanilla SPSA updates
+          - ``AdamSPSA``: SPSA gradient estimate + Adam-style update
+
+        Hyperparameters are read from ``self.options`` when present; otherwise
+        conservative defaults are used.
+        """
+        state    = self.state.clone()
+        thetas   = state[:, self.num_qubits + 3:]
+        rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float64)
+        n_params = len(angles)
+
+        if n_params == 0:
+            return thetas, 0, angles
+
+        qulacs_inst    = vc.Parametric_Circuit(self.num_qubits, self.noise_models, self.noise_values)
+        qulacs_circuit = qulacs_inst.construct_ansatz(state)
+
+        def cost(x):
+            return vc.get_energy_qulacs(
+                x, observable=self.hamiltonian, weights=self.weights,
+                circuit=qulacs_circuit, n_qubits=self.num_qubits,
+                energy_shift=self.energy_shift, n_shots=int(self.n_shots),
+                phys_noise=self.phys_noise,
+                state=self.ket,
+            )
+
+        opts = getattr(self, "options", {})
+        a      = float(opts.get("a", 0.05))
+        alpha  = float(opts.get("alpha", 0.602))
+        c      = float(opts.get("c", 0.1))
+        gamma  = float(opts.get("gamma", 0.101))
+        A      = float(opts.get("lamda", max(10.0, self.global_iters * 0.1)))
+        beta_1 = float(opts.get("beta_1", 0.9))
+        beta_2 = float(opts.get("beta_2", 0.999))
+
+        use_adam = str(method).upper() == "ADAMSPSA"
+        x = angles.copy()
+        best_x = x.copy()
+        best_val = float(cost(x))
+        nfev = 1
+
+        m = np.zeros_like(x)
+        v = np.zeros_like(x)
+        iters = max(1, int(self.global_iters))
+
+        for epoch in range(iters):
+            ak = vc._spsa_lr(epoch, a=a, A=A, alpha=alpha)
+            ck = vc._spsa_ck(epoch, c=c, gamma=gamma)
+            grad = vc._spsa_grad(cost, x, n_params, ck)
+            nfev += 2
+
+            if use_adam:
+                step, m, v = vc._adam_step(epoch, grad, m, v, beta_1, beta_2)
+                x = x - ak * step
+            else:
+                x = x - ak * grad
+
+            val = float(cost(x))
+            nfev += 1
+            if val < best_val:
+                best_val = val
+                best_x = x.copy()
+
+        thetas[rot_pos] = torch.tensor(best_x, dtype=torch.float32)
+        return thetas, nfev, best_x
+
     # ── reward function ───────────────────────────────────────────────────────
 
     def reward_fn(self, energy):
         fn = self.fn_type
         max_depth = self.step_counter == (self.num_layers - 1)
+        prev_gap = abs(self.prev_energy - self.min_eig) + 1e-10
+        start_gap = abs(self.start_energy - self.min_eig) + 1e-10
 
         if fn == "incremental_with_fixed_ends":
             if self.error < self.done_threshold:
@@ -327,7 +507,7 @@ class CircuitEnv:
                 return -5.0
             else:
                 return float(np.clip(
-                    (self.prev_energy - energy) / abs(self.prev_energy - self.min_eig),
+                    (self.prev_energy - energy) / prev_gap,
                     -1, 1,
                 ))
         elif fn == "incremental_with_fixed_start":
@@ -337,7 +517,7 @@ class CircuitEnv:
                 return -5.0
             else:
                 return float(np.clip(
-                    (self.prev_energy - energy) / abs(self.start_energy - self.min_eig),
+                    (self.prev_energy - energy) / start_gap,
                     -1, 1,
                 ))
         elif fn == "nive_fives":
@@ -347,10 +527,10 @@ class CircuitEnv:
                 return -5.0
             return 0.0
         elif fn == "incremental":
-            return (self.prev_energy - energy) / abs(self.prev_energy - self.min_eig)
+            return (self.prev_energy - energy) / prev_gap
         elif fn == "incremental_clipped":
             return float(np.clip(
-                (self.prev_energy - energy) / abs(self.prev_energy - self.min_eig),
+                (self.prev_energy - energy) / prev_gap,
                 -1, 1,
             ))
         elif fn == "naive":
@@ -371,7 +551,7 @@ class CircuitEnv:
                 return -5.0
             else:
                 return float(np.clip(
-                    (self.prev_energy - energy) / abs(self.prev_energy - self.min_eig),
+                    (self.prev_energy - energy) / prev_gap,
                     -1, 1,
                 ))
         else:
@@ -453,7 +633,6 @@ class CircuitEnv:
             ill[k] = []
 
         # decode to action indices
-        action_dict    = dictionary_of_actions(self.num_qubits)
-        illegal_decoded = [k for k, v in action_dict.items() if v in ill]
+        illegal_decoded = [k for k, v in self.action_dict.items() if v in ill]
         self.illegal_actions = ill
         return illegal_decoded

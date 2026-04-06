@@ -5,11 +5,18 @@ not exercised in the current benchmark (noise_models = 0).
 """
 
 import numpy as np
+import torch
 from typing import List, Callable, Optional
 from scipy.optimize import OptimizeResult
 
-from qulacs import ParametricQuantumCircuit, QuantumState, DensityMatrix
+from qulacs import ParametricQuantumCircuit, DensityMatrix, QuantumState as QuantumStateCPU
 from qulacs.gate import CNOT, RX, RY, RZ
+try:
+    from qulacs import QuantumStateGpu as QuantumStateGPU
+except ImportError:
+    QuantumStateGPU = QuantumStateCPU
+# Default alias used by single-env (sequential) code paths.
+QuantumState = QuantumStateGPU
 from qulacs.gate import (DepolarizingNoise, TwoQubitDepolarizingNoise,
                           AmplitudeDampingNoise)
 
@@ -68,21 +75,25 @@ class Parametric_Circuit:
 # ── Energy evaluation ─────────────────────────────────────────────────────────
 
 def get_energy_qulacs(angles, observable, weights, circuit, n_qubits,
-                      energy_shift, n_shots, phys_noise=False, which_angles=[]):
+                      energy_shift, n_shots, phys_noise=False, which_angles=[],
+                      state=None):
     param_count = circuit.get_parameter_count()
     if not list(which_angles):
         which_angles = np.arange(param_count)
     for i, j in enumerate(which_angles):
         circuit.set_parameter(j, angles[i])
 
-    expval     = _get_exp_val(n_qubits, circuit, observable, phys_noise)
+    expval     = _get_exp_val(n_qubits, circuit, observable, phys_noise, state=state)
     shot_noise = _get_shot_noise(weights, n_shots)
     return expval + shot_noise + energy_shift
 
 
-def _get_exp_val(n_qubits, circuit, op, phys_noise=False, err_mitig=0):
+def _get_exp_val(n_qubits, circuit, op, phys_noise=False, err_mitig=0, state=None):
     if not phys_noise:
-        state = QuantumState(n_qubits)
+        if state is None:
+            state = QuantumState(n_qubits)
+        else:
+            state.set_zero_state()
         circuit.update_quantum_state(state)
         psi = state.get_vector()
         return (np.conj(psi).T @ op @ psi).real
@@ -114,6 +125,114 @@ def _get_noise_channels(model_name, n_qubits, error_prob):
     }
     model = _map[model_name]
     return [model(q, error_prob) for q in range(n_qubits)]
+
+
+# ── Batched GPU VQE ───────────────────────────────────────────────────────────
+
+class BatchedVQE:
+    """Evaluate B circuits simultaneously on GPU via PyTorch tensor contractions.
+
+    Replaces B sequential Qulacs calls with one batched matmul kernel.
+    Gates are applied as einsum contractions on the (B, 2^n) state tensor;
+    CNOT uses index-swap arithmetic — no unitary matrix is ever materialised.
+
+    Circuit structure is read from CircuitEnv.state (same layer-then-type order
+    as make_circuit / construct_ansatz), so results are numerically identical to
+    the Qulacs noiseless path.
+    """
+
+    def __init__(self, n_qubits: int, hamiltonian, energy_shift: float, device):
+        self.n      = n_qubits
+        self.dim    = 1 << n_qubits
+        self.device = device
+        self.set_problem(hamiltonian, energy_shift)
+        self._cnot_cache: dict = {}
+
+    def set_problem(self, hamiltonian, energy_shift: float):
+        """Update Hamiltonian / energy shift used for batched energy evaluation."""
+        self.shift = float(energy_shift)
+        self.H = torch.tensor(
+            np.array(hamiltonian, dtype=np.complex64),
+            device=self.device,
+        )
+
+    # ── public API ─────────────────────────────────────────────────────────────
+
+    def eval_batch(self, state, angle_batch):
+        """Evaluate B circuits sharing the same gate structure but different angles.
+
+        Parameters
+        ----------
+        state       : (L, N+6, N) CircuitEnv state tensor (any device)
+        angle_batch : (B, n_rot_params) float32 tensor on self.device.
+                      Column j → j-th rotation gate in layer-major, row-major order
+                      (same ordering as scipy_optim / rotosolve_optim rot_pos).
+
+        Returns
+        -------
+        (B,) float32 energy tensor on self.device
+        """
+        n  = self.n
+        B  = angle_batch.shape[0]
+        st = state.to(self.device)
+
+        psi = torch.zeros(B, self.dim, dtype=torch.complex64, device=self.device)
+        psi[:, 0] = 1.0          # |0...0⟩
+
+        rot_idx = 0
+        for l in range(st.shape[0]):
+            layer = st[l]
+            # CNOTs
+            cnot_targs, cnot_ctrls = (layer[:n] == 1).nonzero(as_tuple=True)
+            for targ, ctrl in zip(cnot_targs.tolist(), cnot_ctrls.tolist()):
+                psi = self._cnot(psi, ctrl, targ)
+            # Rotations
+            rot_axes, rot_qubits = (layer[n:n+3] == 1).nonzero(as_tuple=True)
+            for axis_0, q in zip(rot_axes.tolist(), rot_qubits.tolist()):
+                psi = self._rot(psi, axis_0 + 1, q, angle_batch[:, rot_idx])
+                rot_idx += 1
+
+        # E_b = ⟨ψ_b|H|ψ_b⟩ via einsum (no intermediate (B,dim,dim) tensor)
+        energies = torch.real(torch.einsum('bi,ij,bj->b', psi.conj(), self.H, psi))
+        return energies + self.shift
+
+    # ── gate helpers ──────────────────────────────────────────────────────────
+
+    def _rot(self, psi, axis: int, q: int, thetas):
+        """Apply R_{axis}(θ_b) on qubit q.  psi: (B,2^n), thetas: (B,) float32."""
+        B   = psi.shape[0]
+        ph  = thetas.to(torch.float32) * 0.5
+        c   = torch.cos(ph).to(torch.complex64)   # (B,)
+        s   = torch.sin(ph).to(torch.complex64)   # (B,)
+
+        if axis == 1:        # RX = [[c, -is], [-is, c]]
+            G = torch.stack([torch.stack([c, -1j*s], 1),
+                             torch.stack([-1j*s,  c], 1)], 1)          # (B,2,2)
+        elif axis == 2:      # RY = [[c, -s], [s, c]]  (real entries)
+            G = torch.stack([torch.stack([c, -s], 1),
+                             torch.stack([s,  c], 1)], 1)
+        else:                # RZ = diag(e^{-iθ/2}, e^{+iθ/2})
+            z = torch.zeros(B, dtype=torch.complex64, device=self.device)
+            G = torch.stack([torch.stack([c - 1j*s, z       ], 1),
+                             torch.stack([z,        c + 1j*s], 1)], 1)
+
+        # Reshape psi to (B, 2^{n-q-1}, 2, 2^q): upper | qubit q | lower
+        psi_r   = psi.reshape(B, 1 << (self.n - q - 1), 2, 1 << q)
+        psi_out = torch.einsum('bji,buil->bujl', G, psi_r)
+        return psi_out.reshape(B, self.dim)
+
+    def _cnot(self, psi, ctrl: int, targ: int):
+        """CNOT(ctrl, targ) via index-swap — same for all B, no matrix formed."""
+        key = (ctrl, targ)
+        if key not in self._cnot_cache:
+            idx    = torch.arange(self.dim, device=self.device)
+            src    = idx[((idx >> ctrl) & 1 == 1) & ((idx >> targ) & 1 == 0)]
+            self._cnot_cache[key] = (src, src ^ (1 << targ))
+        src, dst   = self._cnot_cache[key]
+        psi_new    = psi.clone()
+        psi_new[:, src] = psi[:, dst]
+        psi_new[:, dst] = psi[:, src]
+        return psi_new
 
 
 # ── SPSA optimisers (kept for completeness, used when optim_alg != COBYLA) ───

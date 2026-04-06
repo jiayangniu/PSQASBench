@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ..utils import dictionary_of_actions, dict_of_actions_revert_q
+from ..utils import get_action_dict, dict_of_actions_revert_q
 
 
 class DQN:
@@ -19,6 +19,7 @@ class DQN:
     def __init__(self, conf, action_size, state_size, device):
         self.num_qubits    = conf["env"]["num_qubits"]
         self.num_layers    = conf["env"]["num_layers"]
+        self.batch_size    = int(conf["agent"]["batch_size"])
         self.final_gamma   = conf["agent"]["final_gamma"]
         self.epsilon_min   = conf["agent"]["epsilon_min"]
         self.epsilon_decay = conf["agent"]["epsilon_decay"]
@@ -40,7 +41,8 @@ class DQN:
         if conf["agent"].get("threshold_in_state"):
             self.state_size += 1
 
-        self.translate     = dictionary_of_actions(self.num_qubits)
+        connectivity = conf["env"].get("connectivity", "all")
+        self.translate     = get_action_dict(self.num_qubits, connectivity)
         self.rev_translate = dict_of_actions_revert_q(self.num_qubits)
         self.policy_net    = self._build_network(neuron_list, drop_prob).to(device)
         self.target_net    = copy.deepcopy(self.policy_net)
@@ -80,6 +82,34 @@ class DQN:
         q = self.policy_net(state.unsqueeze(0))
         q[0][list(ill_actions)] = float("-inf")
         return torch.argmax(q[0]).item(), False
+
+    def act_batch(self, states_list, ill_actions_list):
+        """Batch ε-greedy for K envs — one GPU forward pass instead of K separate calls.
+
+        Args:
+            states_list      : list of K state tensors (each already on self.device)
+            ill_actions_list : list of K illegal-action index lists
+
+        Returns:
+            list of K (action_int, is_random) tuples, same schema as act().
+        """
+        K     = len(states_list)
+        batch = torch.stack(states_list)          # (K, state_size) on GPU
+        with torch.no_grad():
+            q_batch = self.policy_net(batch)      # (K, action_size)
+
+        results = []
+        for k in range(K):
+            if torch.rand(1).item() <= self.epsilon:
+                a = torch.randint(self.action_size, (1,)).item()
+                while a in ill_actions_list[k]:
+                    a = torch.randint(self.action_size, (1,)).item()
+                results.append((a, True))
+            else:
+                q = q_batch[k].clone()
+                q[list(ill_actions_list[k])] = float("-inf")
+                results.append((torch.argmax(q).item(), False))
+        return results
 
     def replay(self, batch_size):
         if self.step_counter % self.update_target_net == 0:
