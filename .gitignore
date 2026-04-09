@@ -17,3 +17,6 @@ wandb/
 
 # Scratch / copy configs
 *\ copy.cfg
+
+# Local run scripts
+run_*.sh
