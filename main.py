@@ -1,12 +1,10 @@
 import sys
-
 import torch
 
 from bench_utils import (
     MOL_DIR, CONFIG_DIR, RESULT_DIR, MOL_FILES,
     METHOD_CONFIG_DIR, redirect_output, parse_args, get_runner,
 )
-
 
 def main():
     print("=" * 60)
@@ -41,7 +39,6 @@ def main():
     sys.stderr = sys.__stderr__
     log.close()
     return result
-
 
 if __name__ == "__main__":
     main()

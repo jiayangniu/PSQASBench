@@ -20,8 +20,8 @@ from .utils import map_theta
 class HyCircuitEnv(CircuitEnv):
     """CircuitEnv with hybrid action support (act_param + refine_delta)."""
 
-    def __init__(self, conf, device, use_gpu_state: bool = True):
-        super().__init__(conf, device, use_gpu_state=use_gpu_state)
+    def __init__(self, conf, device, use_gpu_state: bool = True, shared_bvqe=None):
+        super().__init__(conf, device, use_gpu_state=use_gpu_state, shared_bvqe=shared_bvqe)
         self.delta_mask = np.zeros(self.num_layers, dtype=np.float32)
         self.refine_mode = conf["env"].get("refine_mode", "delta")
 

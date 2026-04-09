@@ -130,7 +130,7 @@
 给定固定 policy，K 个随机 seed 下生成 K 条电路：
 
 - **D_struct**（结构多样性）：固定角度 θ=π/4，计算 CNOT 骨架的 pairwise HS 距离
-- **D_func**（功能多样性）：各电路独立优化至 θ*，计算优化后 Unitary 的 pairwise HS 距离
+- **x z**（功能多样性）：各电路独立优化至 θ*，计算优化后 Unitary 的 pairwise HS 距离
 
 诊断矩阵：
 

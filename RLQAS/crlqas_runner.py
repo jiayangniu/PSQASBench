@@ -258,11 +258,19 @@ class CRLQASRunner(BaseRunner):
         log_every  = max(1, int(self.conf["general"].get("log_every", 10)))
         save_every = max(1, int(self.conf["general"].get("save_every", 200)))
 
+        _ham_type  = self.conf["problem"].get("ham_type", "mol")
+        _nq        = self.conf["env"]["num_qubits"]
+        _mol_short = f"{_ham_type}_{_nq}q"
+        _optim     = self.conf.get("non_local_opt", {}).get("optim_alg", "noopt")
+        _device    = self.device.type  # "cpu" or "cuda"
+        _run_name  = f"crlqas_{_mol_short}_{_optim}_{_device}_seed{self.seed}"
+        _group     = f"crlqas_{_mol_short}_{_optim}_{_device}"
+
         wandb.init(
             project="PSQASBench",
             entity="jiayangniu14-rmit-university",
-            name=f"crlqas_{mol_name}_{config_tag}_seed{self.seed}",
-            group=f"crlqas_{mol_name}_{config_tag}",
+            name=_run_name,
+            group=_group,
             config={**self.conf, "config_name": self.config_path.name},
         )
         wandb.define_metric("episode")
@@ -357,197 +365,6 @@ class CRLQASRunner(BaseRunner):
             bufs.append(b)
         return bufs
 
-    def _eval_env_energies_batched(self, envs):
-        """Evaluate current energies for multiple envs with grouped GPU batches.
-
-        Group envs by identical circuit structure (state[:N+3]) so one
-        BatchedVQE.eval_batch call can evaluate all angle vectors in that group.
-        Falls back to env.get_energy() for phys-noise envs.
-        Returns: dict[idx] = (energy, energy_noiseless)
-        """
-        out = {}
-        groups = {}
-
-        for idx, env in enumerate(envs):
-            if env.phys_noise:
-                continue
-            st_struct = env.state[:, : env.num_qubits + 3].contiguous().cpu().numpy().astype(np.uint8)
-            key = (env.num_qubits, env.num_layers, st_struct.tobytes())
-            groups.setdefault(key, []).append(idx)
-
-        # Noiseless groups: one batched GPU call per unique structure.
-        for _, idxs in groups.items():
-            ref = envs[idxs[0]]
-            bdev = ref._batched_vqe.device
-            ref_state = ref.state.to(bdev)
-            rot_pos = (ref.state[:, ref.num_qubits: ref.num_qubits + 3] == 1).nonzero(as_tuple=True)
-            n_params = len(rot_pos[0])
-
-            if n_params > 0:
-                angle_rows = []
-                for i in idxs:
-                    th = envs[i].state[:, envs[i].num_qubits + 3:]
-                    angle_rows.append(np.asarray(th[rot_pos].cpu().detach(), dtype=np.float32))
-                angle_batch = torch.tensor(np.stack(angle_rows, axis=0), device=bdev)
-            else:
-                angle_batch = torch.empty((len(idxs), 0), dtype=torch.float32, device=bdev)
-
-            e_noiseless = ref._batched_vqe.eval_batch(ref_state, angle_batch).detach().cpu().numpy()
-            for row, i in enumerate(idxs):
-                shot_noise = vc._get_shot_noise(envs[i].weights, envs[i].n_shots)
-                out[i] = (float(e_noiseless[row] + shot_noise), float(e_noiseless[row]))
-
-        # Phys-noise path stays with existing scalar evaluator.
-        for idx, env in enumerate(envs):
-            if idx not in out:
-                out[idx] = env.get_energy()
-
-        return out
-
-    def _rotosolve_envs_batched(self, envs, opt_states=None):
-        """Run Rotosolve for many envs by batching probes across envs.
-
-        Env states are grouped by identical circuit structure so each group can
-        be evaluated by one BatchedVQE kernel per sweep.
-        """
-        if opt_states is None:
-            opt_states = [env.state.clone() for env in envs]
-
-        groups = {}
-        for idx, env in enumerate(envs):
-            st = opt_states[idx]
-            st_struct = st[:, : env.num_qubits + 3].contiguous().cpu().numpy().astype(np.uint8)
-            key = (env.num_qubits, env.num_layers, st_struct.tobytes())
-            groups.setdefault(key, []).append(idx)
-
-        probe_vals = np.array([0.0, np.pi / 2.0, np.pi], dtype=np.float32)
-
-        for _, idxs in groups.items():
-            ref = envs[idxs[0]]
-            ref_opt_state = opt_states[idxs[0]]
-            rot_pos = (ref_opt_state[:, ref.num_qubits: ref.num_qubits + 3] == 1).nonzero(as_tuple=True)
-            n_params = len(rot_pos[0])
-            if n_params == 0:
-                continue
-
-            bdev = ref._batched_vqe.device
-            ref_state = ref_opt_state.to(bdev)
-            n_probes_env = 3 * n_params
-            G = len(idxs)
-
-            angles = np.zeros((G, n_params), dtype=np.float32)
-            for g, env_idx in enumerate(idxs):
-                st = opt_states[env_idx]
-                th = st[:, envs[env_idx].num_qubits + 3:]
-                angles[g] = np.asarray(th[rot_pos].cpu().detach(), dtype=np.float32)
-
-            sweeps = int(getattr(ref, "rotosolve_sweeps", 1))
-            for _ in range(sweeps):
-                probe_blocks = np.repeat(angles, repeats=n_probes_env, axis=0)
-                for g in range(G):
-                    base = g * n_probes_env
-                    for p in range(n_params):
-                        probe_blocks[base + 3 * p : base + 3 * p + 3, p] = probe_vals
-
-                angle_t = torch.tensor(probe_blocks, dtype=torch.float32, device=bdev)
-                energies = ref._batched_vqe.eval_batch(ref_state, angle_t).detach().cpu().numpy()
-
-                for g in range(G):
-                    e_env = energies[g * n_probes_env : (g + 1) * n_probes_env]
-                    for p in range(n_params):
-                        e0, epi2, epi = e_env[3 * p], e_env[3 * p + 1], e_env[3 * p + 2]
-                        A = (e0 - epi) / 2.0
-                        C = (e0 + epi) / 2.0
-                        B = epi2 - C
-                        angles[g, p] = float(np.arctan2(-B, -A))
-
-            for g, env_idx in enumerate(idxs):
-                th = envs[env_idx].state[:, envs[env_idx].num_qubits + 3:]
-                th[rot_pos] = torch.tensor(angles[g], dtype=torch.float32)
-
-    def _spsa_envs_batched(self, envs, opt_states=None, method="SPSA"):
-        """Run grouped batched SPSA/AdamSPSA across many envs with same structure."""
-        if opt_states is None:
-            opt_states = [env.state.clone() for env in envs]
-
-        groups = {}
-        for idx, env in enumerate(envs):
-            st = opt_states[idx]
-            st_struct = st[:, : env.num_qubits + 3].contiguous().cpu().numpy().astype(np.uint8)
-            key = (env.num_qubits, env.num_layers, st_struct.tobytes())
-            groups.setdefault(key, []).append(idx)
-
-        method_name = str(method).upper()
-        use_adam = method_name == "ADAMSPSA"
-
-        for _, idxs in groups.items():
-            ref = envs[idxs[0]]
-            ref_opt_state = opt_states[idxs[0]]
-            rot_pos = (ref_opt_state[:, ref.num_qubits: ref.num_qubits + 3] == 1).nonzero(as_tuple=True)
-            n_params = len(rot_pos[0])
-            if n_params == 0:
-                continue
-
-            bdev = ref._batched_vqe.device
-            ref_state = ref_opt_state.to(bdev)
-            G = len(idxs)
-
-            angles = np.zeros((G, n_params), dtype=np.float32)
-            for g, env_idx in enumerate(idxs):
-                st = opt_states[env_idx]
-                th = st[:, envs[env_idx].num_qubits + 3:]
-                angles[g] = np.asarray(th[rot_pos].cpu().detach(), dtype=np.float32)
-
-            opts = getattr(ref, "options", {})
-            a      = float(opts.get("a", 0.05))
-            alpha  = float(opts.get("alpha", 0.602))
-            c      = float(opts.get("c", 0.1))
-            gamma  = float(opts.get("gamma", 0.101))
-            A      = float(opts.get("lamda", max(10.0, ref.global_iters * 0.1)))
-            beta_1 = float(opts.get("beta_1", 0.9))
-            beta_2 = float(opts.get("beta_2", 0.999))
-            iters  = max(1, int(ref.global_iters))
-
-            angle_t = torch.tensor(angles, dtype=torch.float32, device=bdev)
-            best_vals = ref._batched_vqe.eval_batch(ref_state, angle_t).detach().cpu().numpy()
-            best_angles = angles.copy()
-            m = np.zeros_like(angles, dtype=np.float32)
-            v = np.zeros_like(angles, dtype=np.float32)
-
-            for epoch in range(iters):
-                ak = vc._spsa_lr(epoch, a=a, A=A, alpha=alpha)
-                ck = vc._spsa_ck(epoch, c=c, gamma=gamma)
-                delta = np.random.choice([-1.0, 1.0], size=angles.shape).astype(np.float32)
-
-                plus_t = torch.tensor(angles + ck * delta, dtype=torch.float32, device=bdev)
-                minus_t = torch.tensor(angles - ck * delta, dtype=torch.float32, device=bdev)
-                probe_t = torch.cat((plus_t, minus_t), dim=0)
-                probe_e = ref._batched_vqe.eval_batch(ref_state, probe_t).detach().cpu().numpy()
-                e_plus, e_minus = probe_e[:G], probe_e[G:]
-
-                grad_scale = ((e_plus - e_minus) / (2.0 * ck)).astype(np.float32)[:, None]
-                grad = grad_scale / delta
-
-                if use_adam:
-                    m = beta_1 * m + (1.0 - beta_1) * grad
-                    v = beta_2 * v + (1.0 - beta_2) * (grad ** 2)
-                    mhat = m / (1.0 - beta_1 ** (epoch + 1))
-                    vhat = v / (1.0 - beta_2 ** (epoch + 1))
-                    step = mhat / (np.sqrt(vhat) + 1e-8)
-                    angles = angles - ak * step
-                else:
-                    angles = angles - ak * grad
-
-                curr_t = torch.tensor(angles, dtype=torch.float32, device=bdev)
-                curr_vals = ref._batched_vqe.eval_batch(ref_state, curr_t).detach().cpu().numpy()
-                improved = curr_vals < best_vals
-                best_vals[improved] = curr_vals[improved]
-                best_angles[improved] = angles[improved]
-
-            for g, env_idx in enumerate(idxs):
-                th = envs[env_idx].state[:, envs[env_idx].num_qubits + 3:]
-                th[rot_pos] = torch.tensor(best_angles[g], dtype=torch.float32)
-
     def _train_parallel(self, envs, agent, total_episodes):
         """Parallel training loop: batch policy inference + grouped GPU energy eval.
 
@@ -584,13 +401,20 @@ class CRLQASRunner(BaseRunner):
         energy_history, cnot_history = [], []
         total_ep = 0
 
-        mol_name = Path(self.mol_path).stem
+        mol_name   = Path(self.mol_path).stem
         config_tag = self.config_path.stem
+        _ham_type  = self.conf["problem"].get("ham_type", "mol")
+        _nq        = self.conf["env"]["num_qubits"]
+        _mol_short = f"{_ham_type}_{_nq}q"
+        _optim     = self.conf.get("non_local_opt", {}).get("optim_alg", "noopt")
+        _device    = self.device.type
+        _run_name  = f"crlqas_{_mol_short}_{_optim}_{_device}_seed{self.seed}"
+        _group     = f"crlqas_{_mol_short}_{_optim}_{_device}"
         wandb.init(
             project="PSQASBench",
             entity="jiayangniu14-rmit-university",
-            name=f"crlqas_par{K}_{mol_name}_{config_tag}_seed{self.seed}",
-            group=f"crlqas_{mol_name}_{config_tag}",
+            name=_run_name,
+            group=_group,
             config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
         wandb.define_metric("episode")
@@ -599,7 +423,8 @@ class CRLQASRunner(BaseRunner):
         # Dedicated eval env — periodic_eval runs K greedy episodes that modify
         # the env's moments/step_counter.  Using a training env would corrupt its
         # circuit state between rounds (greedy_rollout_k only saves curriculum).
-        _eval_env = CircuitEnv(self.conf, device=self.device, use_gpu_state=False)
+        _eval_env = CircuitEnv(self.conf, device=self.device, use_gpu_state=False,
+                               shared_bvqe=envs[0]._batched_vqe)
 
         t_train_start = time.perf_counter()
         cfg_non_local = self.conf.get("non_local_opt", {})
@@ -617,14 +442,23 @@ class CRLQASRunner(BaseRunner):
             (env.optim_method == "scipy_each_step" and str(env.optim_alg).upper() in {"SPSA", "ADAMSPSA"} and not env.phys_noise)
             for env in envs
         )
+        global_psr_enabled = self._as_bool(
+            cfg_non_local.get("global_batched_psr", 1), default=True
+        )
+        use_global_batched_psr = global_psr_enabled and all(
+            (env.optim_method == "scipy_each_step" and str(env.optim_alg).upper() == "PSRADAM" and not env.phys_noise)
+            for env in envs
+        )
         use_global_batched_optimizer = (
-            use_global_batched_rotosolve or use_global_batched_spsa
+            use_global_batched_rotosolve or use_global_batched_spsa or use_global_batched_psr
         )
         optimizer_mode = None
         if use_global_batched_rotosolve:
             optimizer_mode = "Rotosolve"
         elif use_global_batched_spsa:
             optimizer_mode = str(envs[0].optim_alg)
+        elif use_global_batched_psr:
+            optimizer_mode = "PSRAdam"
 
         if optimizer_mode is not None:
             print(
@@ -674,6 +508,12 @@ class CRLQASRunner(BaseRunner):
                     envs,
                     opt_states=[opt_ref_states[k] for k in range(K)],
                     method=envs[0].optim_alg,
+                )
+                for k in range(K):
+                    step_states[k] = envs[k].state.clone()
+            elif use_global_batched_psr:
+                self._psr_adam_envs_batched(
+                    envs, opt_states=[opt_ref_states[k] for k in range(K)]
                 )
                 for k in range(K):
                     step_states[k] = envs[k].state.clone()
@@ -816,12 +656,14 @@ class CRLQASRunner(BaseRunner):
         agent.saver  = _Saver(self.result_dir, self.seed)
         self._agent  = agent   # expose for greedy_episode()
 
+        _shared_bvqe = env._batched_vqe
         global_best, energy_history, cnot_history = self.train_with_parallel_entry(
             env=env,
             agent=agent,
             episodes=self.conf["general"]["episodes"],
             train_single_fn=self._train,
-            make_env_fn=lambda: CircuitEnv(self.conf, device=self.device, use_gpu_state=False),
+            make_env_fn=lambda: CircuitEnv(self.conf, device=self.device, use_gpu_state=False,
+                                           shared_bvqe=_shared_bvqe),
             train_parallel_fn=self._train_parallel,
             require_batch_divisible=True,
         )

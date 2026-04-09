@@ -27,7 +27,7 @@ from .utils import get_action_dict, to_tuple4
 
 class CircuitEnv:
 
-    def __init__(self, conf, device, use_gpu_state: bool = True):
+    def __init__(self, conf, device, use_gpu_state: bool = True, shared_bvqe=None):
         self.num_qubits    = conf["env"]["num_qubits"]
         self.num_layers    = conf["env"]["num_layers"]
         self.random_halt   = int(conf["env"]["rand_halt"])
@@ -98,9 +98,14 @@ class CircuitEnv:
             _bvqe_dev = _runner_dev
         else:
             _bvqe_dev = torch.device("cpu")
-        self._batched_vqe = vc.BatchedVQE(
-            self.num_qubits, self.hamiltonian, self.energy_shift, _bvqe_dev
-        )
+        if shared_bvqe is not None:
+            self._batched_vqe = shared_bvqe
+            self._owns_batched_vqe = False
+        else:
+            self._batched_vqe = vc.BatchedVQE(
+                self.num_qubits, self.hamiltonian, self.energy_shift, _bvqe_dev
+            )
+            self._owns_batched_vqe = True
 
         self.done_threshold = conf["env"]["accept_err"]
 
@@ -137,9 +142,28 @@ class CircuitEnv:
                 for key in ("alpha", "c", "gamma", "beta_1", "beta_2", "lamda"):
                     if key in conf["non_local_opt"]:
                         self.options[key] = conf["non_local_opt"][key]
+            elif "lr" in conf["non_local_opt"]:
+                self.options = {
+                    "lr": conf["non_local_opt"]["lr"],
+                }
+                for key in ("beta_1", "beta_2"):
+                    if key in conf["non_local_opt"]:
+                        self.options[key] = conf["non_local_opt"][key]
+            # GPU-COBYLA: use BatchedVQE (batch_size=1) inside scipy.optimize
+            # instead of Qulacs CPU.  No external batching across envs.
+            self._batched_cobyla = bool(int(
+                conf["non_local_opt"].get("global_batched_cobyla", 0)
+            ))
+            # CPU-optimizer: force Qulacs CPU for Rotosolve / PSRAdam energy eval.
+            # Used for benchmarking GPU vs CPU cost.  Overrides GPU paths.
+            self._cpu_optimizer = bool(int(
+                conf["non_local_opt"].get("cpu_optimizer", 0)
+            ))
         else:
             self.global_iters = 0
             self.optim_method = None
+            self._batched_cobyla = False
+            self._cpu_optimizer  = False
 
         self.start_energy = self.min_eig + self.done_threshold
 
@@ -183,10 +207,23 @@ class CircuitEnv:
         if run_optimizer and self.optim_method == "scipy_each_step":
             # Update self.state first so the optimiser sees the newly added gate.
             self.state = next_state.clone()
-            if self.optim_alg == "Rotosolve":
+            _alg = str(self.optim_alg).upper()
+            if getattr(self, "_cpu_optimizer", False):
+                # CPU (Qulacs) path — used for CPU vs GPU benchmarking
+                if _alg == "ROTOSOLVE":
+                    thetas, nfev, opt_ang = self.rotosolve_optim_cpu()
+                elif _alg == "PSRADAM":
+                    thetas, nfev, opt_ang = self.psr_adam_optim_cpu()
+                else:
+                    thetas, nfev, opt_ang = self.scipy_optim(self.optim_alg)
+            elif _alg == "ROTOSOLVE":
                 thetas, nfev, opt_ang = self.rotosolve_optim()
-            elif str(self.optim_alg).upper() in {"SPSA", "ADAMSPSA"}:
+            elif _alg in {"SPSA", "ADAMSPSA"}:
                 thetas, nfev, opt_ang = self.spsa_optim(self.optim_alg)
+            elif _alg == "PSRADAM":
+                thetas, nfev, opt_ang = self.psr_adam_optim()
+            elif getattr(self, "_batched_cobyla", False):
+                thetas, nfev, opt_ang = self.scipy_optim_gpu(self.optim_alg)
             else:
                 thetas, nfev, opt_ang = self.scipy_optim(self.optim_alg)
             for i in range(self.num_layers):
@@ -285,7 +322,8 @@ class CircuitEnv:
             self.weights      = __ham["weights"]
             eigvals           = __ham["eigvals"]
             self.energy_shift = float(__ham["energy_shift"])
-            self._batched_vqe.set_problem(self.hamiltonian, self.energy_shift)
+            if self._owns_batched_vqe:
+                self._batched_vqe.set_problem(self.hamiltonian, self.energy_shift)
             self.min_eig      = (self.fake_min_energy if self.fake_min_energy is not None
                                  else float(min(eigvals)) + self.energy_shift)
             self.min_energy   = float(min(eigvals)) + self.energy_shift
@@ -369,6 +407,36 @@ class CircuitEnv:
         thetas[rot_pos] = torch.tensor(result["x"], dtype=torch.float)
         return thetas, result["nfev"], result["x"]
 
+    def scipy_optim_gpu(self, method):
+        """COBYLA (or any scipy optimizer) using BatchedVQE (GPU) for energy eval.
+
+        Drop-in replacement for scipy_optim: each cost-function call issues a
+        single eval_batch call with batch_size=1 instead of a Qulacs CPU call.
+        No cross-env batching — the speedup comes from GPU arithmetic over CPU.
+        """
+        state   = self.state.clone()
+        thetas  = state[:, self.num_qubits + 3:]
+        rot_pos = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        x0      = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float32)
+
+        if len(x0) == 0:
+            return thetas, 0, x0
+
+        bvqe   = self._batched_vqe
+        bdev   = bvqe.device
+        st_gpu = state.to(bdev)
+
+        def cost(x):
+            probe = torch.tensor(x.reshape(1, -1), dtype=torch.float32, device=bdev)
+            return bvqe.eval_batch(st_gpu, probe).item()
+
+        result = scipy.optimize.minimize(
+            cost, x0=x0, method=method,
+            options={"maxiter": self.global_iters},
+        )
+        thetas[rot_pos] = torch.tensor(result["x"], dtype=torch.float)
+        return thetas, result["nfev"], result["x"]
+
     # ── Rotosolve optimiser ────────────────────────────────────────────────────
 
     def rotosolve_optim(self):
@@ -424,6 +492,11 @@ class CircuitEnv:
     def spsa_optim(self, method="SPSA"):
         """SPSA-style optimiser with optional Adam preconditioning.
 
+        Uses BatchedVQE (GPU) for energy evaluation — same backend as
+        rotosolve_optim.  Each iteration batches the +/- perturbation probes
+        into one eval_batch call (2 rows) instead of two sequential Qulacs
+        calls.
+
         Supported method names:
           - ``SPSA``: vanilla SPSA updates
           - ``AdamSPSA``: SPSA gradient estimate + Adam-style update
@@ -434,25 +507,22 @@ class CircuitEnv:
         state    = self.state.clone()
         thetas   = state[:, self.num_qubits + 3:]
         rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
-        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float64)
+        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float32)
         n_params = len(angles)
 
         if n_params == 0:
             return thetas, 0, angles
 
-        qulacs_inst    = vc.Parametric_Circuit(self.num_qubits, self.noise_models, self.noise_values)
-        qulacs_circuit = qulacs_inst.construct_ansatz(state)
+        bvqe   = self._batched_vqe
+        bdev   = bvqe.device
+        st_gpu = state.to(bdev)
 
-        def cost(x):
-            return vc.get_energy_qulacs(
-                x, observable=self.hamiltonian, weights=self.weights,
-                circuit=qulacs_circuit, n_qubits=self.num_qubits,
-                energy_shift=self.energy_shift, n_shots=int(self.n_shots),
-                phys_noise=self.phys_noise,
-                state=self.ket,
-            )
+        def cost_batch(angle_matrix):
+            """angle_matrix: (B, n_params) ndarray → (B,) ndarray of energies."""
+            t = torch.tensor(angle_matrix, dtype=torch.float32, device=bdev)
+            return bvqe.eval_batch(st_gpu, t).detach().cpu().numpy()
 
-        opts = getattr(self, "options", {})
+        opts   = getattr(self, "options", {})
         a      = float(opts.get("a", 0.05))
         alpha  = float(opts.get("alpha", 0.602))
         c      = float(opts.get("c", 0.1))
@@ -462,32 +532,224 @@ class CircuitEnv:
         beta_2 = float(opts.get("beta_2", 0.999))
 
         use_adam = str(method).upper() == "ADAMSPSA"
-        x = angles.copy()
-        best_x = x.copy()
-        best_val = float(cost(x))
-        nfev = 1
+        x        = angles.reshape(1, -1)          # (1, n_params)
+        best_val = cost_batch(x)[0]
+        best_x   = x.copy()
+        nfev     = 1
 
         m = np.zeros_like(x)
         v = np.zeros_like(x)
         iters = max(1, int(self.global_iters))
 
         for epoch in range(iters):
-            ak = vc._spsa_lr(epoch, a=a, A=A, alpha=alpha)
-            ck = vc._spsa_ck(epoch, c=c, gamma=gamma)
-            grad = vc._spsa_grad(cost, x, n_params, ck)
+            ak    = vc._spsa_lr(epoch, a=a, A=A, alpha=alpha)
+            ck    = vc._spsa_ck(epoch, c=c, gamma=gamma)
+            delta = np.random.choice([-1.0, 1.0], size=x.shape).astype(np.float32)
+
+            probe = np.concatenate([x + ck * delta, x - ck * delta], axis=0)  # (2, n_params)
+            e     = cost_batch(probe)                                           # (2,)
             nfev += 2
 
+            grad = ((e[0] - e[1]) / (2.0 * ck)) / delta   # (1, n_params)
+
             if use_adam:
-                step, m, v = vc._adam_step(epoch, grad, m, v, beta_1, beta_2)
-                x = x - ak * step
+                m    = beta_1 * m + (1.0 - beta_1) * grad
+                v    = beta_2 * v + (1.0 - beta_2) * grad ** 2
+                mhat = m / (1.0 - beta_1 ** (epoch + 1))
+                vhat = v / (1.0 - beta_2 ** (epoch + 1))
+                x    = x - ak * mhat / (np.sqrt(vhat) + 1e-8)
             else:
                 x = x - ak * grad
 
-            val = float(cost(x))
+            val = cost_batch(x)[0]
             nfev += 1
             if val < best_val:
                 best_val = val
-                best_x = x.copy()
+                best_x   = x.copy()
+
+        best_x_flat = best_x.flatten()
+        thetas[rot_pos] = torch.tensor(best_x_flat, dtype=torch.float32)
+        return thetas, nfev, best_x_flat
+
+    def psr_adam_optim(self):
+        """Parameter Shift Rule + Adam optimiser.
+
+        Computes the exact gradient via PSR — 2 evaluations per parameter,
+        all batched into one eval_batch call (2*n_params rows) per Adam step.
+        Total GPU calls: K + 1  (K gradient evals + 1 final energy check).
+
+        global_iters controls the number of Adam steps K (10–20 is typically
+        sufficient; contrast with SPSA which needs 100–1000).
+        """
+        state    = self.state.clone()
+        thetas   = state[:, self.num_qubits + 3:]
+        rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float32)
+        n_params = len(angles)
+
+        if n_params == 0:
+            return thetas, 0, angles
+
+        bvqe   = self._batched_vqe
+        bdev   = bvqe.device
+        st_gpu = state.to(bdev)
+
+        opts   = getattr(self, "options", {})
+        lr     = float(opts.get("lr", 0.01))
+        beta_1 = float(opts.get("beta_1", 0.9))
+        beta_2 = float(opts.get("beta_2", 0.999))
+        K      = max(1, int(self.global_iters))
+
+        x      = angles.reshape(1, -1)   # (1, n_params)
+        nfev   = 0
+        m      = np.zeros_like(x)
+        v      = np.zeros_like(x)
+
+        # Initial energy for best-solution tracking
+        init_t   = torch.tensor(x, dtype=torch.float32, device=bdev)
+        best_val = bvqe.eval_batch(st_gpu, init_t).item()
+        best_x   = x.copy()
+        nfev    += 1
+
+        for step in range(K):
+            # PSR probe matrix: (2*n_params, n_params)
+            # Row 2i:   x with x[i] + pi/2
+            # Row 2i+1: x with x[i] - pi/2
+            probe = np.repeat(x, 2 * n_params, axis=0)   # (2n, n)
+            for i in range(n_params):
+                probe[2 * i,     i] += np.pi / 2
+                probe[2 * i + 1, i] -= np.pi / 2
+
+            probe_t  = torch.tensor(probe, dtype=torch.float32, device=bdev)
+            energies = bvqe.eval_batch(st_gpu, probe_t).detach().cpu().numpy()  # (2n,)
+            nfev    += 2 * n_params
+
+            grad = (energies[0::2] - energies[1::2]) / 2.0  # (n_params,) exact
+            grad = grad.reshape(1, -1)
+
+            m    = beta_1 * m + (1 - beta_1) * grad
+            v    = beta_2 * v + (1 - beta_2) * grad ** 2
+            mhat = m / (1 - beta_1 ** (step + 1))
+            vhat = v / (1 - beta_2 ** (step + 1))
+            x    = x - lr * mhat / (np.sqrt(vhat) + 1e-8)
+
+        # Final evaluation — keep better of initial vs optimised
+        final_t   = torch.tensor(x, dtype=torch.float32, device=bdev)
+        final_val = bvqe.eval_batch(st_gpu, final_t).item()
+        nfev     += 1
+        if final_val < best_val:
+            best_x = x.copy()
+
+        best_x_flat = best_x.flatten()
+        thetas[rot_pos] = torch.tensor(best_x_flat, dtype=torch.float32)
+        return thetas, nfev, best_x_flat
+
+    # ── CPU optimisers (Qulacs-based, for GPU vs CPU benchmarking) ────────────
+
+    def _qulacs_cost_fn(self, state):
+        """Return a callable cost(angles_vec) using Qulacs CPU evaluation."""
+        qulacs_inst   = vc.Parametric_Circuit(self.num_qubits, self.noise_models, self.noise_values)
+        qulacs_circuit = qulacs_inst.construct_ansatz(state)
+        def cost(x):
+            return vc.get_energy_qulacs(
+                x, observable=self.hamiltonian, weights=self.weights,
+                circuit=qulacs_circuit, n_qubits=self.num_qubits,
+                energy_shift=self.energy_shift, n_shots=int(self.n_shots),
+                phys_noise=self.phys_noise, state=self.ket,
+            )
+        return cost
+
+    def rotosolve_optim_cpu(self):
+        """Rotosolve using Qulacs CPU energy evaluation (no BatchedVQE).
+
+        Same algorithm as rotosolve_optim() but each of the 3*n_params probe
+        evaluations is a sequential Qulacs CPU call.  Used for CPU vs GPU
+        benchmarking — the wall-clock difference shows the GPU batching gain.
+        """
+        state    = self.state.clone()
+        thetas   = state[:, self.num_qubits + 3:]
+        rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float64)
+        n_params = len(angles)
+
+        if n_params == 0:
+            return thetas, 0, angles
+
+        cost     = self._qulacs_cost_fn(state)
+        probe_vals = np.array([0.0, np.pi / 2.0, np.pi])
+        nfev     = 0
+
+        for _ in range(self.rotosolve_sweeps):
+            for i in range(n_params):
+                orig = angles[i]
+                e_vals = []
+                for pv in probe_vals:
+                    angles[i] = pv
+                    e_vals.append(cost(angles))
+                    nfev += 1
+                angles[i] = orig
+                e0, epi2, epi = e_vals
+                A = (e0 - epi) / 2.0
+                C = (e0 + epi) / 2.0
+                B = epi2 - C
+                angles[i] = float(np.arctan2(-B, -A))
+
+        thetas[rot_pos] = torch.tensor(angles, dtype=torch.float)
+        return thetas, nfev, angles
+
+    def psr_adam_optim_cpu(self):
+        """PSR + Adam using Qulacs CPU energy evaluation (no BatchedVQE).
+
+        Same algorithm as psr_adam_optim() but each PSR probe (2 per parameter
+        per Adam step) is a sequential Qulacs CPU call.  Used for CPU vs GPU
+        benchmarking.  Includes the theta=0 perturbation fix.
+        """
+        state    = self.state.clone()
+        thetas   = state[:, self.num_qubits + 3:]
+        rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
+        raw      = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float64)
+        n_params = len(raw)
+
+        if n_params == 0:
+            return thetas, 0, raw
+
+        # Break theta=0 symmetry (same fix as _psr_adam_envs_batched)
+        zero_mask = np.abs(raw) < 1e-6
+        raw[zero_mask] = np.random.uniform(-0.3, 0.3, zero_mask.sum())
+        angles = raw.copy()
+
+        opts   = getattr(self, "options", {})
+        lr     = float(opts.get("lr", 0.01))
+        beta_1 = float(opts.get("beta_1", 0.9))
+        beta_2 = float(opts.get("beta_2", 0.999))
+        K      = max(1, int(self.global_iters))
+
+        cost     = self._qulacs_cost_fn(state)
+        best_val = cost(angles)
+        best_x   = angles.copy()
+        nfev     = 1
+
+        m = np.zeros(n_params)
+        v = np.zeros(n_params)
+
+        for step in range(K):
+            grad = np.zeros(n_params)
+            for i in range(n_params):
+                x_plus          = angles.copy(); x_plus[i]  += np.pi / 2
+                x_minus         = angles.copy(); x_minus[i] -= np.pi / 2
+                grad[i] = (cost(x_plus) - cost(x_minus)) / 2.0
+                nfev += 2
+
+            m    = beta_1 * m + (1 - beta_1) * grad
+            v    = beta_2 * v + (1 - beta_2) * grad ** 2
+            mhat = m / (1 - beta_1 ** (step + 1))
+            vhat = v / (1 - beta_2 ** (step + 1))
+            angles = angles - lr * mhat / (np.sqrt(vhat) + 1e-8)
+
+        final_val = cost(angles)
+        nfev += 1
+        if final_val < best_val:
+            best_x = angles.copy()
 
         thetas[rot_pos] = torch.tensor(best_x, dtype=torch.float32)
         return thetas, nfev, best_x

@@ -35,6 +35,11 @@ MOL_FILES = {
     "L5_H3_Linear_6q":      "L5_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz",
     "L5_H4_Chain_8q":       "L5_H4_Chain_8q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0;_H_.0_.0_3.0_jordan_wigner.npz",
     "L6_BeH2_10q":          "L6_BeH2_Scalability_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    # BeH2 basis-set scalability ladder (L6): same geometry, increasing basis/qubits
+    "L6_BeH2_STO3G_6q":    "L6_BeH2_STO3G_6q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    "L6_BeH2_631G_8q":     "L6_BeH2_631G_8q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    "L6_BeH2_6311G_10q":   "L6_BeH2_6311G_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    "L6_BeH2_CCPVDZ_12q":  "L6_BeH2_CCPVDZ_12q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
 }
 
 

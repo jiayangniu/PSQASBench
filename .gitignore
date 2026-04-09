@@ -11,3 +11,9 @@ mol_gen/molecular_fingerprints_full.csv
 *.npz
 *.npy
 *.h5
+
+# Wandb runtime artifacts
+wandb/
+
+# Scratch / copy configs
+*\ copy.cfg
