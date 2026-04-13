@@ -33,7 +33,8 @@ def main():
     print(f"[PSQASBench] method={args['method']}  mol={args['mol']}  "
           f"config={args['config']}  seed={seed}  device={device}")
     runner = get_runner(args['method'], config_path, mol_path,
-                        result_dir, seed, device)
+                        result_dir, seed, device,
+                        save_summary_detailed=args["save_summary_detailed"])
     result = runner.run()
     sys.stdout = sys.__stdout__
     sys.stderr = sys.__stderr__

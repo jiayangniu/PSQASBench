@@ -10,7 +10,8 @@ import numpy as np
 import torch
 import wandb
 
-from .utils import get_config, set_seed
+from .result_logger import ResultLogger
+from .utils import count_rotation_gates, get_config, set_seed
 from .hy_environment import HyCircuitEnv
 from .agents.Hybrid_REINFORCE import HybridActionPolicy
 from .agents.Hybrid_REINFORCE_RENEW import HybridActionPolicywithRefine
@@ -36,15 +37,23 @@ class HyRLQASRunner(BaseRunner):
         result_dir: Path,
         seed: int,
         device: torch.device | None = None,
+        save_summary_detailed: int | None = None,
     ):
         self.config_path = Path(config_path)
         self.device      = device or torch.device("cpu")
 
         self.conf = get_config(str(self.config_path))
+        if save_summary_detailed is not None:
+            self.conf.setdefault("general", {})["save_summary_detailed"] = int(save_summary_detailed)
+        self.save_summary_detailed = bool(int(self.conf.get("general", {}).get("save_summary_detailed", 0)))
+        self.runtime_overrides = {}
+        if save_summary_detailed is not None:
+            self.runtime_overrides["save_summary_detailed"] = int(save_summary_detailed)
         self.conf["problem"]["mol_data_dir"] = str(Path(mol_path).parent)
         self.conf["problem"]["mol_file"]     = Path(mol_path).name
 
         self._agent = None   # set in run(), used by greedy/stochastic_episode
+        self.artifacts = None
 
         super().__init__(self.conf, mol_path, result_dir, seed)
 
@@ -87,6 +96,93 @@ class HyRLQASRunner(BaseRunner):
     def _save_checkpoint(self, agent, tag: str):
         torch.save(agent.state_dict(), self.result_dir / f"{tag}_model.pth")
         torch.save(agent.optim.state_dict(), self.result_dir / f"{tag}_optim.pth")
+
+    def _mol_key(self) -> str:
+        return self.result_dir.parents[1].name
+
+    def _init_artifacts(self):
+        self.artifacts = ResultLogger(
+            self.result_dir,
+            self.config_path,
+            method="hyrlqas",
+            mol=self._mol_key(),
+            seed=self.seed,
+            device=str(self.device),
+            exact_energy=self.exact_energy,
+            accept_err=float(self.conf["env"]["accept_err"]),
+            save_summary_detailed=self.save_summary_detailed,
+            runtime_overrides=self.runtime_overrides,
+        )
+
+    def _bind_wandb_run(self):
+        if self.artifacts is not None and wandb.run is not None:
+            self.artifacts.set_wandb_run(wandb.run.name, wandb.run.id)
+
+    def _record_global_best(self, global_best, env, episode: int, step: int, agent):
+        energy_now = float(env.energy)
+        rotation_count = int(count_rotation_gates(env.op_history))
+        depth = int(step) + 1
+        global_best.update({
+            "energy": energy_now,
+            "episode": episode,
+            "step": step,
+            "error": abs(energy_now - env.min_energy),
+            "cnot_count": int(env.current_number_of_cnots),
+            "rotation_count": rotation_count,
+            "depth": depth,
+            "op_history": list(env.op_history),
+            "moments": list(env.moments),
+            "state": env.state.clone(),
+        })
+        self._save_checkpoint(
+            agent,
+            tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
+        )
+        wandb.log({
+            "global_best/energy": energy_now,
+            "global_best/energy_error": abs(energy_now - env.min_energy) * 1000.0,
+            "global_best/depth": depth,
+            "global_best/cnot_count": int(env.current_number_of_cnots),
+            "global_best/rotation_count": rotation_count,
+            "episode": episode,
+        })
+        if self.artifacts is not None:
+            self.artifacts.update_best_train({
+                "episode": episode,
+                "step": step,
+                "energy": energy_now,
+                "energy_error": abs(energy_now - env.min_energy),
+                "depth": depth,
+                "cnot_count": int(env.current_number_of_cnots),
+                "rotation_count": rotation_count,
+                "op_history": list(env.op_history),
+            })
+
+    def _append_policy_loss(self, episode: int, step: int, loss: float):
+        if self.artifacts is not None:
+            self.artifacts.append_policy_loss(
+                episode=episode,
+                step=step,
+                policy_loss=float(loss),
+            )
+
+    def _episode_summary_record(self, *, episode: int, env, episode_return: float,
+                                episode_time_sec: float, is_global_best: bool):
+        depth = int(env.step_counter) + 1
+        rotation_count = int(count_rotation_gates(env.op_history))
+        return {
+            "episode": episode,
+            "final_energy": float(env.energy),
+            "final_energy_error": float(env.error),
+            "episode_return": float(episode_return),
+            "depth": depth,
+            "cnot_count": int(env.current_number_of_cnots),
+            "rotation_count": rotation_count,
+            "n_steps": depth,
+            "epsilon_end": "",
+            "episode_time_sec": float(episode_time_sec),
+            "is_global_best": int(bool(is_global_best)),
+        }
 
     def _make_agent(self, env: HyCircuitEnv):
         conf   = self.conf
@@ -139,8 +235,10 @@ class HyRLQASRunner(BaseRunner):
             agent.refine_backbone.train()
 
         return {
+            "energy":       float(env.energy),
             "energy_error": float(env.error),
             "cnot_count":   int(env.current_number_of_cnots),
+            "rotation_count": int(count_rotation_gates(env.op_history)),
             "success":      int(env.error < accept_err),
             "steps":        itr + 1,
             "op_history":   list(env.op_history),
@@ -158,6 +256,8 @@ class HyRLQASRunner(BaseRunner):
         torch.manual_seed(seed)
 
         agent.HybridAction_policy_net.eval()
+        if is_renew:
+            agent.refine_backbone.eval()
 
         with torch.no_grad():
             state = env.reset()
@@ -185,10 +285,14 @@ class HyRLQASRunner(BaseRunner):
                     break
 
         agent.HybridAction_policy_net.train()
+        if is_renew:
+            agent.refine_backbone.train()
 
         return {
+            "energy":       float(env.energy),
             "energy_error": float(env.error),
             "cnot_count":   int(env.current_number_of_cnots),
+            "rotation_count": int(count_rotation_gates(env.op_history)),
             "success":      int(env.error < accept_err),
             "steps":        itr + 1,
             "op_history":   list(env.op_history),
@@ -206,6 +310,13 @@ class HyRLQASRunner(BaseRunner):
         agent.HybridAction_policy_net.train()
         traj      = []
         ep_return = 0.0
+        trace = {
+            "actions": [],
+            "energies": [],
+            "energy_errors": [],
+            "rewards": [],
+        }
+        episode_hit_global_best = False
 
         for itr in range(env.num_layers + 1):
             ill = env.illegal_action_new()
@@ -223,10 +334,15 @@ class HyRLQASRunner(BaseRunner):
                     "action":      a,
                     "act_param":   (None if act_param is None else float(act_param)),
                     "reward":      float(reward),
-                    "ill_action":  list(ill) if ill else [],
-                    "delta_mask":  dm.detach().cpu().numpy().tolist(),
+                        "ill_action":  list(ill) if ill else [],
+                        "delta_mask":  dm.detach().cpu().numpy().tolist(),
+                        "delta_sample": delta_sample.detach().cpu().numpy().tolist(),
+                    }
+                trace["actions"].append({
+                    "action": int(a),
+                    "act_param": (None if act_param is None else float(act_param)),
                     "delta_sample": delta_sample.detach().cpu().numpy().tolist(),
-                }
+                })
             else:
                 a, act_param, _, _ = agent.act(state, ill)
                 next_state, reward, done, _ = env.step(agent.translate[a], act_param)
@@ -237,39 +353,29 @@ class HyRLQASRunner(BaseRunner):
                     "reward":     float(reward),
                     "ill_action": list(ill) if ill else [],
                 }
+                trace["actions"].append({
+                    "action": int(a),
+                    "act_param": (None if act_param is None else float(act_param)),
+                })
 
             traj.append(step_record)
             state      = self._modify_state(next_state, env)
             ep_return += float(reward)
+            trace["energies"].append(float(env.energy))
+            trace["energy_errors"].append(float(env.error))
+            trace["rewards"].append(float(reward))
 
             energy_now = float(env.energy)
             if energy_now < global_best["energy"]:
-                global_best.update({
-                    "energy":     energy_now,
-                    "episode":    ep,
-                    "step":       itr,
-                    "error":      abs(energy_now - env.min_energy),
-                    "cnot_count": int(env.current_number_of_cnots),
-                    "op_history": list(env.op_history),
-                    "moments":    list(env.moments),
-                    "state":      env.state.clone(),
-                })
-                self._save_checkpoint(
-                    agent,
-                    tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
-                )
-                wandb.log({
-                    "global_best/energy":       energy_now,
-                    "global_best/energy_error": abs(energy_now - env.min_energy) * 1000,
-                    "episode": ep,
-                })
+                self._record_global_best(global_best, env, ep, itr, agent)
+                episode_hit_global_best = True
 
             if done:
                 break
 
         energy_history.append(float(env.energy))
         cnot_history.append(int(env.current_number_of_cnots))
-        return traj, ep_return
+        return traj, ep_return, trace, episode_hit_global_best
 
     def _train(self, env: HyCircuitEnv, agent, episodes: int):
         mol_name   = Path(self.mol_path).stem
@@ -296,11 +402,13 @@ class HyRLQASRunner(BaseRunner):
             group=_group,
             config={**self.conf, "config_name": self.config_path.name},
         )
+        self._bind_wandb_run()
         wandb.define_metric("episode")
         wandb.define_metric("*", step_metric="episode")
 
         global_best    = {"energy": float("inf"), "episode": None, "step": None,
                           "error": None, "cnot_count": 0, "op_history": None,
+                          "rotation_count": 0, "depth": 0,
                           "moments": None, "state": None}
         energy_history = []
         cnot_history   = []
@@ -309,11 +417,12 @@ class HyRLQASRunner(BaseRunner):
 
         for ep in range(episodes):
             t_ep = time.perf_counter()
-            traj, ep_return = self._one_episode(
+            traj, ep_return, ep_trace, ep_hit_global_best = self._one_episode(
                 ep, env, agent, global_best, energy_history, cnot_history
             )
             batch_trajs.append(traj)
-            ep_ms = (time.perf_counter() - t_ep) * 1000.0
+            ep_sec = time.perf_counter() - t_ep
+            ep_ms = ep_sec * 1000.0
             elapsed = time.perf_counter() - t_train_start
 
             if len(batch_trajs) >= batch_size:
@@ -326,13 +435,31 @@ class HyRLQASRunner(BaseRunner):
                         batch_trajs, agent.entropy_coef, agent.grad_clip
                     )
                 wandb.log({"train/policy_loss": loss, "episode": ep})
+                self._append_policy_loss(ep, -1, loss)
                 batch_trajs = []
 
+            rotation_count = int(count_rotation_gates(env.op_history))
             wandb.log({
                 "train/episode_energy":    energy_history[-1],
+                "train/episode_energy_error": float(env.error) * 1000.0,
                 "train/reward_accumulate": ep_return,
+                "train/episode_depth": int(env.step_counter) + 1,
+                "train/episode_cnot_count": int(env.current_number_of_cnots),
+                "train/episode_rotation_count": rotation_count,
+                "train/episode_time_sec": ep_sec,
                 "episode": ep,
             })
+            if self.artifacts is not None:
+                self.artifacts.append_episode_summary(
+                    self._episode_summary_record(
+                        episode=ep,
+                        env=env,
+                        episode_return=ep_return,
+                        episode_time_sec=ep_sec,
+                        is_global_best=ep_hit_global_best,
+                    )
+                )
+                self.artifacts.append_episode_trace(ep, ep_trace)
 
             if ep % log_every == 0:
                 err_mha = abs(global_best["energy"] - env.min_energy) * 1000.0
@@ -360,6 +487,8 @@ class HyRLQASRunner(BaseRunner):
                     "eval/D_func":         eval_metrics["D_func"],
                     "episode": ep,
                 })
+                if self.artifacts is not None:
+                    self.artifacts.update_eval(eval_metrics)
                 print(
                     f"[eval ep={ep}]  SR={eval_metrics['sr_at_chem']:.2f}  "
                     f"best_err={eval_metrics['best_error_mha']:.2f} mHa  "
@@ -411,6 +540,7 @@ class HyRLQASRunner(BaseRunner):
             group=_group,
             config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
+        self._bind_wandb_run()
         wandb.define_metric("episode")
         wandb.define_metric("*", step_metric="episode")
 
@@ -422,6 +552,7 @@ class HyRLQASRunner(BaseRunner):
 
         global_best    = {"energy": float("inf"), "episode": None, "step": None,
                           "error": None, "cnot_count": 0, "op_history": None,
+                          "rotation_count": 0, "depth": 0,
                           "moments": None, "state": None}
         energy_history = []
         cnot_history   = []
@@ -429,8 +560,10 @@ class HyRLQASRunner(BaseRunner):
 
         states      = [None] * K
         trajs       = [None] * K
+        std_traces  = [None] * K
         ep_returns  = [0.0] * K
         ep_starts   = [0.0] * K
+        ep_hit_global_best = [False] * K
         active      = [False] * K
 
         episodes_started = 0
@@ -477,8 +610,15 @@ class HyRLQASRunner(BaseRunner):
             st = envs[k].reset()
             states[k] = self._modify_state(st, envs[k])
             trajs[k] = []
+            std_traces[k] = {
+                "actions": [],
+                "energies": [],
+                "energy_errors": [],
+                "rewards": [],
+            }
             ep_returns[k] = 0.0
             ep_starts[k] = time.perf_counter()
+            ep_hit_global_best[k] = False
             active[k] = True
             episodes_started += 1
 
@@ -523,6 +663,11 @@ class HyRLQASRunner(BaseRunner):
                             "delta_sample": delta_sample.detach().cpu().numpy().tolist(),
                         },
                     }
+                    std_traces[k]["actions"].append({
+                        "action": int(a),
+                        "act_param": (None if act_param is None else float(act_param)),
+                        "delta_sample": delta_sample.detach().cpu().numpy().tolist(),
+                    })
                 else:
                     a, act_param, _lt, _lp = agent.act(state, ill)
                     meta = {
@@ -538,6 +683,10 @@ class HyRLQASRunner(BaseRunner):
                             "ill_action": list(ill) if ill else [],
                         },
                     }
+                    std_traces[k]["actions"].append({
+                        "action": int(a),
+                        "act_param": (None if act_param is None else float(act_param)),
+                    })
                 step_meta[k] = meta
 
             # 2) apply actions and optionally defer rotosolve globally
@@ -597,28 +746,14 @@ class HyRLQASRunner(BaseRunner):
                 m["step_record"]["reward"] = float(reward)
                 trajs[k].append(m["step_record"])
                 ep_returns[k] += float(reward)
+                std_traces[k]["rewards"].append(float(reward))
+                std_traces[k]["energies"].append(float(env.energy))
+                std_traces[k]["energy_errors"].append(float(env.error))
 
                 energy_now = float(env.energy)
                 if energy_now < global_best["energy"]:
-                    global_best.update({
-                        "energy":     energy_now,
-                        "episode":    episodes_done,
-                        "step":       env.step_counter,
-                        "error":      abs(energy_now - env.min_energy),
-                        "cnot_count": int(env.current_number_of_cnots),
-                        "op_history": list(env.op_history),
-                        "moments":    list(env.moments),
-                        "state":      env.state.clone(),
-                    })
-                    self._save_checkpoint(
-                        agent,
-                        tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
-                    )
-                    wandb.log({
-                        "global_best/energy":       energy_now,
-                        "global_best/energy_error": abs(energy_now - env.min_energy) * 1000,
-                        "episode": episodes_done,
-                    })
+                    self._record_global_best(global_best, env, episodes_done, env.step_counter, agent)
+                    ep_hit_global_best[k] = True
 
                 if not done:
                     continue
@@ -626,7 +761,8 @@ class HyRLQASRunner(BaseRunner):
                 episode_idx = episodes_done
                 episodes_done += 1
 
-                ep_ms = (time.perf_counter() - ep_starts[k]) * 1000.0
+                ep_sec = time.perf_counter() - ep_starts[k]
+                ep_ms = ep_sec * 1000.0
                 elapsed = time.perf_counter() - t_train_start
                 energy_history.append(float(env.energy))
                 cnot_history.append(int(env.current_number_of_cnots))
@@ -642,13 +778,31 @@ class HyRLQASRunner(BaseRunner):
                             batch_trajs, agent.entropy_coef, agent.grad_clip
                         )
                     wandb.log({"train/policy_loss": loss, "episode": episode_idx})
+                    self._append_policy_loss(episode_idx, -1, loss)
                     batch_trajs = []
 
+                rotation_count = int(count_rotation_gates(env.op_history))
                 wandb.log({
                     "train/episode_energy":    energy_history[-1],
+                    "train/episode_energy_error": float(env.error) * 1000.0,
                     "train/reward_accumulate": ep_returns[k],
+                    "train/episode_depth": int(env.step_counter) + 1,
+                    "train/episode_cnot_count": int(env.current_number_of_cnots),
+                    "train/episode_rotation_count": rotation_count,
+                    "train/episode_time_sec": ep_sec,
                     "episode": episode_idx,
                 })
+                if self.artifacts is not None:
+                    self.artifacts.append_episode_summary(
+                        self._episode_summary_record(
+                            episode=episode_idx,
+                            env=env,
+                            episode_return=ep_returns[k],
+                            episode_time_sec=ep_sec,
+                            is_global_best=ep_hit_global_best[k],
+                        )
+                    )
+                    self.artifacts.append_episode_trace(episode_idx, std_traces[k])
 
                 if episode_idx % log_every == 0:
                     err_mha = abs(global_best["energy"] - env.min_energy) * 1000.0
@@ -663,6 +817,12 @@ class HyRLQASRunner(BaseRunner):
                     )
 
                 if eval_every > 0 and episode_idx > 0 and episode_idx % eval_every == 0:
+                    # Sync curriculum state from a training env so greedy episodes
+                    # use the current (evolved) done_threshold, not the initial one.
+                    import copy as _copy
+                    _eval_env.done_threshold  = envs[0].done_threshold
+                    _eval_env.curriculum      = _copy.deepcopy(envs[0].curriculum)
+                    _eval_env.curriculum_dict = _copy.deepcopy(envs[0].curriculum_dict)
                     eval_metrics = self.periodic_eval(episode_idx, _eval_env, K=eval_K)
                     wandb.log({
                         "eval/sr_at_chem":     eval_metrics["sr_at_chem"],
@@ -674,6 +834,8 @@ class HyRLQASRunner(BaseRunner):
                         "eval/D_func":         eval_metrics["D_func"],
                         "episode": episode_idx,
                     })
+                    if self.artifacts is not None:
+                        self.artifacts.update_eval(eval_metrics)
                     print(
                         f"[eval ep={episode_idx}]  SR={eval_metrics['sr_at_chem']:.2f}  "
                         f"best_err={eval_metrics['best_error_mha']:.2f} mHa  "
@@ -724,6 +886,8 @@ class HyRLQASRunner(BaseRunner):
     def run(self) -> dict:
         set_seed(self.seed)
         torch.set_num_threads(1)
+        run_start = time.perf_counter()
+        self._init_artifacts()
 
         env   = HyCircuitEnv(self.conf, device=self.device)
         agent = self._make_agent(env)
@@ -751,7 +915,8 @@ class HyRLQASRunner(BaseRunner):
             "best_energy":    global_best["energy"],
             "energy_error":   best_err,
             "cnot_count":     global_best["cnot_count"],
-            "circuit_depth":  global_best["step"] if global_best["step"] is not None else -1,
+            "rotation_count": global_best.get("rotation_count", 0),
+            "circuit_depth":  global_best.get("depth", (global_best["step"] + 1) if global_best["step"] is not None else -1),
             "nfev":           -1,
             "success":        int(best_err < accept_err),
             "energy_history": energy_history,
@@ -759,6 +924,19 @@ class HyRLQASRunner(BaseRunner):
             "exact_energy":   self.exact_energy,
             "accept_err":     accept_err,
         }
+
+        if self.artifacts is not None:
+            self.artifacts.finalize_run_meta(
+                wall_clock_sec=time.perf_counter() - run_start,
+                final_result={
+                    "best_energy": global_best["energy"],
+                    "best_energy_error": best_err,
+                    "best_cnot_count": global_best["cnot_count"],
+                    "best_rotation_count": global_best.get("rotation_count", 0),
+                    "best_depth": global_best.get("depth", 0),
+                    "success": int(best_err < accept_err),
+                },
+            )
 
         out = self.save_result(result)
         print(f"[HyRLQASRunner/{method_name}] seed={self.seed}  "

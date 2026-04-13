@@ -31,15 +31,16 @@ MOL_FILES = {
     "L3_H3_Triangle_6q":    "L3_H3_Triangle_6q_geom_H_.0_.0_0.0;_H_1.0_.0_0.0;_H_0.5_0.866_0.0_jordan_wigner.npz",
     "L4_H2_Stretch_4q":     "L4_H2_Stretch_4q_geom_H_.0_.0_0.0;_H_.0_.0_2.5_jordan_wigner.npz",
     "L4_H3_Linear_6q":      "L4_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz",
-    "L4_H2O_StrongCorr_8q": "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_0.757_0.586;_H_.0_-0.757_0.586_jordan_wigner.npz",
+    "L4_H2O_StrongCorr_8q": "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_1.186_0.918;_H_.0_-1.186_0.918_jordan_wigner.npz",
     "L5_H3_Linear_6q":      "L5_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz",
     "L5_H4_Chain_8q":       "L5_H4_Chain_8q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0;_H_.0_.0_3.0_jordan_wigner.npz",
     "L6_BeH2_10q":          "L6_BeH2_Scalability_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
-    # BeH2 basis-set scalability ladder (L6): same geometry, increasing basis/qubits
-    "L6_BeH2_STO3G_6q":    "L6_BeH2_STO3G_6q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    # BeH2 basis-set ladder: 6q STO-3G now serves as the L1 anchor.
+    "L1_BeH2_STO3G_6q":    "L1_BeH2_STO3G_6q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
     "L6_BeH2_631G_8q":     "L6_BeH2_631G_8q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
     "L6_BeH2_6311G_10q":   "L6_BeH2_6311G_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
     "L6_BeH2_CCPVDZ_12q":  "L6_BeH2_CCPVDZ_12q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
+    "L6_BeH2_CCPVDZ_14q":  "L6_BeH2_CCPVDZ_14q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz",
 }
 
 
@@ -90,6 +91,8 @@ def parse_args() -> dict:
                         help="Random seed (e.g. 11111)")
     parser.add_argument("--device", required=True,
                         help="Torch device string (e.g. cuda:0, cpu)")
+    parser.add_argument("--save-summary-detailed", required=False, type=int, choices=[0, 1],
+                        help="Whether to save the legacy detailed summary_<seed>.npy (0/1)")
 
     args = parser.parse_args()
     return dict(
@@ -98,17 +101,33 @@ def parse_args() -> dict:
         seed=args.seed,
         device=args.device,
         config=(args.config if args.config else f"{args.mol}.cfg"),
+        save_summary_detailed=args.save_summary_detailed,
     )
 
 
 # ── Runner factory ────────────────────────────────────────────────────────────
 
 def get_runner(method: str, config_path: Path, mol_path: Path,
-               result_dir: Path, seed: int, device: torch.device):
+               result_dir: Path, seed: int, device: torch.device,
+               save_summary_detailed: int | None = None):
     if method == "crlqas":
         from RLQAS import CRLQASRunner
-        return CRLQASRunner(config_path, mol_path, result_dir, seed, device)
+        return CRLQASRunner(
+            config_path,
+            mol_path,
+            result_dir,
+            seed,
+            device,
+            save_summary_detailed=save_summary_detailed,
+        )
     if method == "hyrlqas":
         from RLQAS import HyRLQASRunner
-        return HyRLQASRunner(config_path, mol_path, result_dir, seed, device)
+        return HyRLQASRunner(
+            config_path,
+            mol_path,
+            result_dir,
+            seed,
+            device,
+            save_summary_detailed=save_summary_detailed,
+        )
     raise ValueError(f"Unknown method '{method}'. Implemented so far: {METHODS}")

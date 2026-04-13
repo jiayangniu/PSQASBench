@@ -10,7 +10,8 @@ import numpy as np
 import torch
 import wandb
 
-from .utils import get_config, set_seed
+from .result_logger import ResultLogger
+from .utils import count_rotation_gates, get_config, set_seed
 from .environment import CircuitEnv
 from . import VQE as vc
 from . import agents as bench_agents
@@ -20,12 +21,15 @@ from .base_runner import BaseRunner
 class _Saver:
     """Minimal stats recorder matching the interface CRLQAS agents expect."""
 
-    def __init__(self, result_dir: Path, seed: int):
+    def __init__(self, result_dir: Path, seed: int, enabled: bool = True):
         self.stats_file = {"train": {}, "test": {}}
         self.exp_seed   = seed
         self.rpath      = result_dir
+        self.enabled    = enabled
 
     def get_new_episode(self, mode, episode_no):
+        if not self.enabled:
+            return
         self.stats_file[mode][episode_no] = {
             "loss": [], "actions": [], "errors": [],
             "errors_noiseless": [], "done_threshold": 0,
@@ -33,6 +37,10 @@ class _Saver:
         }
 
     def save_file(self):
+        if not self.enabled:
+            return
+        if not self.stats_file["train"] and not self.stats_file["test"]:
+            return
         np.save(self.rpath / f"summary_{self.exp_seed}.npy", self.stats_file)
 
 
@@ -55,17 +63,25 @@ class CRLQASRunner(BaseRunner):
         result_dir: Path,
         seed: int,
         device: torch.device | None = None,
+        save_summary_detailed: int | None = None,
     ):
         self.config_path = Path(config_path)
         self.device      = device or torch.device("cpu")
 
         self.conf = get_config(str(self.config_path))
+        if save_summary_detailed is not None:
+            self.conf.setdefault("general", {})["save_summary_detailed"] = int(save_summary_detailed)
+        self.save_summary_detailed = bool(int(self.conf.get("general", {}).get("save_summary_detailed", 0)))
+        self.runtime_overrides = {}
+        if save_summary_detailed is not None:
+            self.runtime_overrides["save_summary_detailed"] = int(save_summary_detailed)
 
         self.conf["problem"]["mol_data_dir"] = str(Path(mol_path).parent)
         self.conf["problem"]["mol_file"]     = Path(mol_path).name
 
         # agent is stored on the instance so greedy_episode() can access it
         self._agent = None
+        self.artifacts = None
 
         super().__init__(self.conf, mol_path, result_dir, seed)
 
@@ -98,6 +114,93 @@ class CRLQASRunner(BaseRunner):
     def _save_checkpoint(self, agent, tag: str):
         torch.save(agent.policy_net.state_dict(), self.result_dir / f"{tag}_model.pth")
         torch.save(agent.optim.state_dict(),       self.result_dir / f"{tag}_optim.pth")
+
+    def _mol_key(self) -> str:
+        return self.result_dir.parents[1].name
+
+    def _init_artifacts(self):
+        self.artifacts = ResultLogger(
+            self.result_dir,
+            self.config_path,
+            method="crlqas",
+            mol=self._mol_key(),
+            seed=self.seed,
+            device=str(self.device),
+            exact_energy=self.exact_energy,
+            accept_err=float(self.conf["env"]["accept_err"]),
+            save_summary_detailed=self.save_summary_detailed,
+            runtime_overrides=self.runtime_overrides,
+        )
+
+    def _bind_wandb_run(self):
+        if self.artifacts is not None and wandb.run is not None:
+            self.artifacts.set_wandb_run(wandb.run.name, wandb.run.id)
+
+    def _record_global_best(self, global_best, env, episode: int, step: int, agent):
+        energy_now = float(env.energy)
+        rotation_count = int(count_rotation_gates(env.op_history))
+        depth = int(step) + 1
+        global_best.update({
+            "energy": energy_now,
+            "episode": episode,
+            "step": step,
+            "error": abs(energy_now - env.min_energy),
+            "cnot_count": int(env.current_number_of_cnots),
+            "rotation_count": rotation_count,
+            "depth": depth,
+            "op_history": list(env.op_history),
+            "moments": list(env.moments),
+            "state": env.state.clone(),
+        })
+        self._save_checkpoint(
+            agent,
+            tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
+        )
+        wandb.log({
+            "global_best/energy": energy_now,
+            "global_best/energy_error": abs(energy_now - env.min_energy) * 1000.0,
+            "global_best/depth": depth,
+            "global_best/cnot_count": int(env.current_number_of_cnots),
+            "global_best/rotation_count": rotation_count,
+            "episode": episode,
+        })
+        if self.artifacts is not None:
+            self.artifacts.update_best_train({
+                "episode": episode,
+                "step": step,
+                "energy": energy_now,
+                "energy_error": abs(energy_now - env.min_energy),
+                "depth": depth,
+                "cnot_count": int(env.current_number_of_cnots),
+                "rotation_count": rotation_count,
+                "op_history": list(env.op_history),
+            })
+
+    def _append_policy_loss(self, episode: int, step: int, loss: float):
+        if self.artifacts is not None:
+            self.artifacts.append_policy_loss(
+                episode=episode,
+                step=step,
+                policy_loss=float(loss),
+            )
+
+    def _episode_summary_record(self, *, episode: int, env, episode_return: float,
+                                episode_time_sec: float, is_global_best: bool, epsilon_end):
+        depth = int(env.step_counter) + 1
+        rotation_count = int(count_rotation_gates(env.op_history))
+        return {
+            "episode": episode,
+            "final_energy": float(env.energy),
+            "final_energy_error": float(env.error),
+            "episode_return": float(episode_return),
+            "depth": depth,
+            "cnot_count": int(env.current_number_of_cnots),
+            "rotation_count": rotation_count,
+            "n_steps": depth,
+            "epsilon_end": epsilon_end,
+            "episode_time_sec": float(episode_time_sec),
+            "is_global_best": int(bool(is_global_best)),
+        }
 
     # ── BaseRunner: greedy_episode ─────────────────────────────────────────────
 
@@ -136,8 +239,10 @@ class CRLQASRunner(BaseRunner):
         agent.policy_net.train()
 
         return {
+            "energy":       float(env.energy),
             "energy_error": float(env.error),
             "cnot_count":   int(env.current_number_of_cnots),
+            "rotation_count": int(count_rotation_gates(env.op_history)),
             "success":      int(env.error < accept_err),
             "steps":        itr + 1,
             "op_history":   list(env.op_history),
@@ -178,8 +283,10 @@ class CRLQASRunner(BaseRunner):
         agent.policy_net.train()
 
         return {
+            "energy":       float(env.energy),
             "energy_error": float(env.error),
             "cnot_count":   int(env.current_number_of_cnots),
+            "rotation_count": int(count_rotation_gates(env.op_history)),
             "success":      int(env.error < accept_err),
             "steps":        itr + 1,
             "op_history":   list(env.op_history),
@@ -191,16 +298,26 @@ class CRLQASRunner(BaseRunner):
 
     def _one_episode(self, ep, env, agent, global_best,
                      energy_history, cnot_history):
-        agent.saver.get_new_episode("train", ep)
+        if agent.saver.enabled:
+            agent.saver.get_new_episode("train", ep)
         state = env.reset()
         state = self._modify_state(state, env)
         agent.policy_net.train()
 
         ep_reward = 0.0
+        trace = {
+            "actions": [],
+            "energies": [],
+            "energy_errors": [],
+            "rewards": [],
+        }
+        episode_hit_global_best = False
         for itr in range(env.num_layers + 1):
             ill   = env.illegal_action_new()
             act, _ = agent.act(state, ill)
-            agent.saver.stats_file["train"][ep]["actions"].append(act)
+            trace["actions"].append(int(act))
+            if agent.saver.enabled:
+                agent.saver.stats_file["train"][ep]["actions"].append(act)
 
             next_state, reward, done, _ = env.step(agent.translate[act])
             next_state = self._modify_state(next_state, env)
@@ -214,41 +331,29 @@ class CRLQASRunner(BaseRunner):
             )
             state = next_state.clone()
             ep_reward += float(reward)
-            agent.saver.stats_file["train"][ep]["errors"].append(env.error)
-            agent.saver.stats_file["train"][ep]["errors_noiseless"].append(env.error_noiseless)
+            trace["energies"].append(float(env.energy))
+            trace["energy_errors"].append(float(env.error))
+            trace["rewards"].append(float(reward))
+            if agent.saver.enabled:
+                agent.saver.stats_file["train"][ep]["errors"].append(env.error)
+                agent.saver.stats_file["train"][ep]["errors_noiseless"].append(env.error_noiseless)
 
             energy_now = float(env.energy)
             if energy_now < global_best["energy"]:
-                global_best.update({
-                    "energy":     energy_now,
-                    "episode":    ep,
-                    "step":       itr,
-                    "error":      abs(energy_now - env.min_energy),
-                    "cnot_count": int(env.current_number_of_cnots),
-                    "op_history": list(env.op_history),
-                    "moments":    list(env.moments),
-                    "state":      env.state.clone(),
-                })
-                self._save_checkpoint(
-                    agent,
-                    tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
-                )
-                wandb.log({
-                    "global_best/energy":       energy_now,
-                    "global_best/energy_error": abs(energy_now - env.min_energy) * 1000,
-                    "episode": ep,
-                })
+                self._record_global_best(global_best, env, ep, itr, agent)
+                episode_hit_global_best = True
 
             if len(agent.memory) > self.conf["agent"]["batch_size"]:
                 loss = agent.replay(self.conf["agent"]["batch_size"])
                 wandb.log({"train/policy_loss": loss, "episode": ep})
+                self._append_policy_loss(ep, itr, loss)
 
             if done:
                 break
 
         energy_history.append(float(env.energy))
         cnot_history.append(int(env.current_number_of_cnots))
-        return ep_reward, itr + 1
+        return ep_reward, itr + 1, trace, episode_hit_global_best
 
     def _train(self, env, agent, episodes):
         mol_name   = Path(self.mol_path).stem
@@ -273,11 +378,13 @@ class CRLQASRunner(BaseRunner):
             group=_group,
             config={**self.conf, "config_name": self.config_path.name},
         )
+        self._bind_wandb_run()
         wandb.define_metric("episode")
         wandb.define_metric("*", step_metric="episode")
 
         global_best    = {"energy": float("inf"), "episode": None, "step": None,
                           "error": None, "cnot_count": 0, "op_history": None,
+                          "rotation_count": 0, "depth": 0,
                           "moments": None, "state": None}
         energy_history = []
         cnot_history   = []
@@ -285,10 +392,14 @@ class CRLQASRunner(BaseRunner):
         t_train_start = time.perf_counter()
         for ep in range(episodes):
             t_ep = time.perf_counter()
-            ep_reward, ep_depth = self._one_episode(ep, env, agent, global_best,
-                                                    energy_history, cnot_history)
-            ep_ms = (time.perf_counter() - t_ep) * 1000
+            ep_reward, ep_depth, ep_trace, ep_hit_global_best = self._one_episode(
+                ep, env, agent, global_best, energy_history, cnot_history
+            )
+            ep_sec = time.perf_counter() - t_ep
+            ep_ms = ep_sec * 1000
             elapsed = time.perf_counter() - t_train_start
+            epsilon_end = float(getattr(agent, "epsilon", float("nan")))
+            rotation_count = int(count_rotation_gates(env.op_history))
             if ep % log_every == 0:
                 print(
                     f"[ep {ep:5d}/{episodes}] "
@@ -302,10 +413,27 @@ class CRLQASRunner(BaseRunner):
                 )
             wandb.log({
                 "train/episode_energy":    energy_history[-1],
+                "train/episode_energy_error": float(env.error) * 1000.0,
                 "train/reward_accumulate": ep_reward,
                 "train/episode_depth":     ep_depth,
+                "train/episode_cnot_count": int(env.current_number_of_cnots),
+                "train/episode_rotation_count": rotation_count,
+                "train/episode_time_sec": ep_sec,
+                "train/epsilon": epsilon_end,
                 "episode": ep,
             })
+            if self.artifacts is not None:
+                self.artifacts.append_episode_summary(
+                    self._episode_summary_record(
+                        episode=ep,
+                        env=env,
+                        episode_return=ep_reward,
+                        episode_time_sec=ep_sec,
+                        is_global_best=ep_hit_global_best,
+                        epsilon_end=epsilon_end,
+                    )
+                )
+                self.artifacts.append_episode_trace(ep, ep_trace)
 
             # ── periodic policy evaluation ─────────────────────────────────
             if eval_every > 0 and ep > 0 and ep % eval_every == 0:
@@ -320,6 +448,8 @@ class CRLQASRunner(BaseRunner):
                     "eval/D_func":         eval_metrics["D_func"],
                     "episode": ep,
                 })
+                if self.artifacts is not None:
+                    self.artifacts.update_eval(eval_metrics)
                 print(
                     f"[eval ep={ep}]  SR={eval_metrics['sr_at_chem']:.2f}  "
                     f"best_err={eval_metrics['best_error_mha']:.2f} mHa  "
@@ -329,7 +459,8 @@ class CRLQASRunner(BaseRunner):
                 )
 
             if ep % save_every == 0 and ep > 0:
-                agent.saver.save_file()
+                if self.save_summary_detailed:
+                    agent.saver.save_file()
                 if global_best["state"] is not None:
                     np.savez_compressed(
                         self.result_dir / f"global_best_state_{self.seed}.npz",
@@ -394,9 +525,19 @@ class CRLQASRunner(BaseRunner):
         # exploration on the FIRST step of every newly-reset env to guarantee
         # structural diversity from step 1.
         just_reset = [True] * K
+        ep_returns = [0.0] * K
+        ep_starts = [time.perf_counter()] * K
+        ep_hit_global_best = [False] * K
+        ep_traces = [{
+            "actions": [],
+            "energies": [],
+            "energy_errors": [],
+            "rewards": [],
+        } for _ in range(K)]
 
         global_best = {"energy": float("inf"), "episode": None, "step": None,
                        "error": None, "cnot_count": 0, "op_history": None,
+                       "rotation_count": 0, "depth": 0,
                        "moments": None, "state": None}
         energy_history, cnot_history = [], []
         total_ep = 0
@@ -417,6 +558,7 @@ class CRLQASRunner(BaseRunner):
             group=_group,
             config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
+        self._bind_wandb_run()
         wandb.define_metric("episode")
         wandb.define_metric("*", step_metric="episode")
 
@@ -485,6 +627,7 @@ class CRLQASRunner(BaseRunner):
                         a = torch.randint(agent.action_size, (1,)).item()
                     act_results[k] = (a, True)
                     just_reset[k] = False
+                ep_traces[k]["actions"].append(int(act_results[k][0]))
 
             # ── 2. Apply actions, run (possibly global) optimiser, then energies ──
             step_states = {}
@@ -534,6 +677,10 @@ class CRLQASRunner(BaseRunner):
             for k in range(K):
                 ns, reward, done, _ = outcomes[k]
                 ns_mod = self._modify_state(ns, envs[k])
+                ep_returns[k] += float(reward)
+                ep_traces[k]["rewards"].append(float(reward))
+                ep_traces[k]["energies"].append(float(envs[k].energy))
+                ep_traces[k]["energy_errors"].append(float(envs[k].error))
 
                 nstep_bufs[k].push(
                     states[k],
@@ -545,33 +692,20 @@ class CRLQASRunner(BaseRunner):
 
                 energy_now = float(envs[k].energy)
                 if energy_now < global_best["energy"]:
-                    global_best.update({
-                        "energy":     energy_now,
-                        "episode":    total_ep,
-                        "step":       envs[k].step_counter,
-                        "error":      abs(energy_now - envs[k].min_energy),
-                        "cnot_count": int(envs[k].current_number_of_cnots),
-                        "op_history": list(envs[k].op_history),
-                        "moments":    list(envs[k].moments),
-                        "state":      envs[k].state.clone(),
-                    })
-                    self._save_checkpoint(
-                        agent,
-                        tag=f"best_thresh{self.conf['env']['accept_err']}_seed{self.seed}",
-                    )
-                    wandb.log({
-                        "global_best/energy":       energy_now,
-                        "global_best/energy_error": abs(energy_now - envs[k].min_energy) * 1000,
-                        "episode": total_ep,
-                    })
+                    self._record_global_best(global_best, envs[k], total_ep, envs[k].step_counter, agent)
+                    ep_hit_global_best[k] = True
 
                 if done:
+                    episode_idx = total_ep
+                    ep_sec = time.perf_counter() - ep_starts[k]
+                    epsilon_end = float(getattr(agent, "epsilon", float("nan")))
+                    rotation_count = int(count_rotation_gates(envs[k].op_history))
                     energy_history.append(float(envs[k].energy))
                     cnot_history.append(int(envs[k].current_number_of_cnots))
                     elapsed = time.perf_counter() - t_train_start
-                    if total_ep % log_every == 0:
+                    if episode_idx % log_every == 0:
                         print(
-                            f"[ep {total_ep:5d}/{total_episodes}  env{k}] "
+                            f"[ep {episode_idx:5d}/{total_episodes}  env{k}] "
                             f"energy={energy_history[-1]:.5f}  "
                             f"best={global_best['energy']:.5f}  "
                             f"err={abs(global_best['energy'] - envs[k].min_energy)*1000:.2f}mHa  "
@@ -581,12 +715,31 @@ class CRLQASRunner(BaseRunner):
                         )
                     wandb.log({
                         "train/episode_energy": energy_history[-1],
-                        "train/episode_depth":  envs[k].step_counter + 1,
-                        "episode": total_ep,
+                        "train/episode_energy_error": float(envs[k].error) * 1000.0,
+                        "train/reward_accumulate": ep_returns[k],
+                        "train/episode_depth": envs[k].step_counter + 1,
+                        "train/episode_cnot_count": int(envs[k].current_number_of_cnots),
+                        "train/episode_rotation_count": rotation_count,
+                        "train/episode_time_sec": ep_sec,
+                        "train/epsilon": epsilon_end,
+                        "episode": episode_idx,
                     })
+                    if self.artifacts is not None:
+                        self.artifacts.append_episode_summary(
+                            self._episode_summary_record(
+                                episode=episode_idx,
+                                env=envs[k],
+                                episode_return=ep_returns[k],
+                                episode_time_sec=ep_sec,
+                                is_global_best=ep_hit_global_best[k],
+                                epsilon_end=epsilon_end,
+                            )
+                        )
+                        self.artifacts.append_episode_trace(episode_idx, ep_traces[k])
                     total_ep += 1
                     if total_ep % save_every == 0:
-                        agent.saver.save_file()
+                        if self.save_summary_detailed:
+                            agent.saver.save_file()
                         if global_best["state"] is not None:
                             np.savez_compressed(
                                 self.result_dir / f"global_best_state_{self.seed}.npz",
@@ -600,6 +753,12 @@ class CRLQASRunner(BaseRunner):
                             )
 
                     if eval_every > 0 and total_ep > 0 and total_ep % eval_every == 0:
+                        # Sync curriculum state from a training env so greedy episodes
+                        # use the current (evolved) done_threshold, not the initial one.
+                        import copy as _copy
+                        _eval_env.done_threshold  = envs[0].done_threshold
+                        _eval_env.curriculum      = _copy.deepcopy(envs[0].curriculum)
+                        _eval_env.curriculum_dict = _copy.deepcopy(envs[0].curriculum_dict)
                         eval_metrics = self.periodic_eval(total_ep, _eval_env, K=eval_K)
                         wandb.log({
                             "eval/sr_at_chem":     eval_metrics["sr_at_chem"],
@@ -611,9 +770,20 @@ class CRLQASRunner(BaseRunner):
                             "eval/D_func":         eval_metrics["D_func"],
                             "episode": total_ep,
                         })
+                        if self.artifacts is not None:
+                            self.artifacts.update_eval(eval_metrics)
 
                     new_states[k] = self._modify_state(envs[k].reset(), envs[k])
                     just_reset[k] = True
+                    ep_returns[k] = 0.0
+                    ep_starts[k] = time.perf_counter()
+                    ep_hit_global_best[k] = False
+                    ep_traces[k] = {
+                        "actions": [],
+                        "energies": [],
+                        "energy_errors": [],
+                        "rewards": [],
+                    }
                 else:
                     new_states[k] = ns_mod
 
@@ -638,6 +808,7 @@ class CRLQASRunner(BaseRunner):
             if len(agent.memory) > batch_size:
                 loss = agent.replay(batch_size)
                 wandb.log({"train/policy_loss": loss, "episode": total_ep})
+                self._append_policy_loss(total_ep, round_idx, loss)
 
         wandb.finish()
         return global_best, energy_history, cnot_history
@@ -647,13 +818,15 @@ class CRLQASRunner(BaseRunner):
     def run(self) -> dict:
         set_seed(self.seed)
         torch.set_num_threads(1)
+        run_start = time.perf_counter()
+        self._init_artifacts()
 
         env   = CircuitEnv(self.conf, device=self.device)
         agent = (bench_agents
                  .__dict__[self.conf["agent"]["agent_type"]]
                  .__dict__[self.conf["agent"]["agent_class"]]
                  (self.conf, env.action_size, env.state_size, self.device))
-        agent.saver  = _Saver(self.result_dir, self.seed)
+        agent.saver  = _Saver(self.result_dir, self.seed, enabled=self.save_summary_detailed)
         self._agent  = agent   # expose for greedy_episode()
 
         _shared_bvqe = env._batched_vqe
@@ -667,7 +840,8 @@ class CRLQASRunner(BaseRunner):
             train_parallel_fn=self._train_parallel,
             require_batch_divisible=True,
         )
-        agent.saver.save_file()
+        if self.save_summary_detailed:
+            agent.saver.save_file()
 
         accept_err = self.conf["env"]["accept_err"]
         best_err   = abs(global_best["error"]) if global_best["error"] is not None else float("inf")
@@ -678,7 +852,8 @@ class CRLQASRunner(BaseRunner):
             "best_energy":    global_best["energy"],
             "energy_error":   best_err,
             "cnot_count":     global_best["cnot_count"],
-            "circuit_depth":  global_best["step"] if global_best["step"] is not None else -1,
+            "rotation_count": global_best.get("rotation_count", 0),
+            "circuit_depth":  global_best.get("depth", (global_best["step"] + 1) if global_best["step"] is not None else -1),
             "nfev":           -1,
             "success":        int(best_err < accept_err),
             "energy_history": energy_history,
@@ -686,6 +861,19 @@ class CRLQASRunner(BaseRunner):
             "exact_energy":   self.exact_energy,
             "accept_err":     accept_err,
         }
+
+        if self.artifacts is not None:
+            self.artifacts.finalize_run_meta(
+                wall_clock_sec=time.perf_counter() - run_start,
+                final_result={
+                    "best_energy": global_best["energy"],
+                    "best_energy_error": best_err,
+                    "best_cnot_count": global_best["cnot_count"],
+                    "best_rotation_count": global_best.get("rotation_count", 0),
+                    "best_depth": global_best.get("depth", 0),
+                    "success": int(best_err < accept_err),
+                },
+            )
 
         out = self.save_result(result)
         print(f"[CRLQASRunner] seed={self.seed}  error={best_err*1000:.3f} mHa  "

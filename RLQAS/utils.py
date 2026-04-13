@@ -93,6 +93,13 @@ def to_tuple4(x):
     return tuple(int(v) for v in x)
 
 
+def count_rotation_gates(op_history) -> int:
+    """Count rotation gates in an op-history list."""
+    if not op_history:
+        return 0
+    return sum(1 for op in op_history if isinstance(op, dict) and op.get("type") == "rot")
+
+
 # ── Config parser ─────────────────────────────────────────────────────────────
 
 def get_config(cfg_path: str, verbose: bool = False) -> dict:

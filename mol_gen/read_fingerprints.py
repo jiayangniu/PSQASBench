@@ -1,63 +1,24 @@
-"""
-Hamiltonian Fingerprint Analysis for QAS Benchmarking (full-space version).
+"""Compute fingerprint metrics for the full-space benchmark Hamiltonians.
 
-For each molecule we compute:
-  Original metrics (from Pauli decomposition):
-    [1] Energy gap          Gap01 = E1 - E0
-    [2] Qubit importance    I_q = sum_{i: q in P_i} |c_i|
-        → Hub Score  = max(I_q) / mean(I_q)
-        → Asymmetry  = (max(I_q) - min(I_q)) / mean(I_q)
-    [3] Pauli-type ratios   Z-only / XY-only / Mixed (weight fractions)
-    [4] High-order ratio    weight fraction of terms with >= 4 Pauli operators
+The script reads `.npz` files from `mol_data/` and reports two families of
+descriptors:
 
-  Gershgorin metrics (from Hamiltonian matrix, proposed by Akib):
-    For each row i:  R_i = sum_{j != i} |H_{ij}|  (Gershgorin radius)
+1. Pauli-decomposition summaries
+   - energy gap `Gap01 = E1 - E0`
+   - hub score / qubit asymmetry
+   - Z-only / XY-only / mixed weight fractions
+   - weight fraction carried by terms with four or more Pauli factors
 
-    [G1] Diagonal-dominance fraction
-         G1 = (# rows with |h_ii| >= R_i) / (total rows)
-         G1=1.0 -> fully diagonally dominant (near-diagonal H)
-         G1~0   -> off-diagonal elements dominate in many rows
+2. Gershgorin-style matrix summaries
+   - `G1`: fraction of diagonally dominant rows
+   - `G2`: worst-case ratio `|h_ii| / R_i`
+   - `G3`: the same ratio on the minimum-diagonal row
+   - `G4`: separation between the candidate ground-state disc and all others
 
-    [G2] Worst-case DD ratio
-         G2 = min_i { |h_ii| / R_i }  (over rows with R_i > 0)
-         G2 > 1 -> every row DD (implies G1=1); G2 << 1 -> worst row far from DD
-
-    [G3] HF-state diagonal-dominance ratio
-         Row i* with minimum diagonal element (proxy for Hartree-Fock state)
-         G3 = |h_{i*,i*}| / R_{i*}
-         NOTE: this is a single-row proxy.  The PDF discussion is closer to
-         inspecting the lowest few diagonal entries / Gershgorin discs, but the
-         current implementation uses only the minimum-diagonal row as a compact
-         heuristic.  It is also unstable when R_{i*} ~ 0 (purely diagonal row).
-
-    [G4] Ground-state Gershgorin disc separation
-         upper(GS disc)  = h_{i*,i*} + R_{i*}  (using GS-proxy row i*)
-         lower(other)    = min_{i != i*}(h_{ii} - R_i)
-         G4 = lower(other) - upper(GS disc)
-         G4 > 0 -> GS disc is isolated below all others
-         G4 <= 0 -> GS disc overlaps at least one other disc
-         As with G3, this is the single-disc version of the idea rather than a
-         full "lowest few discs" analysis, so it should be treated as a narrow
-         heuristic rather than a complete structural diagnostic.
-
-This script reads `mol_data/` and computes metrics on the full, unrestricted
-Hamiltonian matrix.  It does NOT impose particle-number / spin-sector
-constraints when evaluating G1-G4 or reporting the eigenspectrum.
-
-Molecules are split into neutral (charge=0) and charged (charge!=0) groups.
-For charged systems in particular, the full-space ground state may lie in the
-wrong sector, so these results should be interpreted as unrestricted baselines.
-
-Interpretation note:
-  G1/G2 are global diagonal-dominance summaries and align closely with the
-  collaborator's diagonal-dominance / Gershgorin motivation.
-  G3/G4 are heuristic operationalizations of that idea for quick comparison
-  across molecules.  They should be described as proxies rather than standard
-  quantum chemistry observables or complete tests of single-reference versus
-  multi-reference character.
-
-Usage:
-  python read_fingerprints.py
+This is the unrestricted, full-space view of the Hamiltonian.  Charged
+molecules are therefore best interpreted as reference baselines rather than as
+fully physical low-energy spectra.  For sector-restricted results, use
+`read_fingerprints_physical.py`.
 """
 
 import numpy as np
@@ -199,10 +160,9 @@ def compute_g3(H):
                  (strong correlation; single-reference methods insufficient)
 
     Scope / limitation:
-      The PDF motivation discussed looking at the lowest few diagonal entries
-      and their Gershgorin discs.  Here we use only the single row with the
-      minimum diagonal element as a lightweight proxy.  This is useful for a
-      compact summary, but it is not a full multireference diagnostic.
+      This is a lightweight single-row proxy built from the minimum-diagonal
+      row.  It is useful for quick comparison across molecules, but it is not a
+      complete multireference diagnostic.
 
     WARNING: If R_{i*} ~ 0 (purely diagonal row), G3 = inf and is uninformative.
     This occurs for molecules where the minimum-diagonal basis state has no
@@ -240,11 +200,9 @@ def compute_g4(H):
     disc against the lowest point reached by any other disc.
 
     Scope / limitation:
-      This follows the same single-row simplification as G3.  The PDF-level idea
-      is closer to inspecting the lowest few candidate discs; here we only score
-      the minimum-diagonal disc against the rest of the matrix.  It is therefore
-      still a very partial proxy and should not be over-interpreted as a full
-      single-reference / multi-reference criterion.
+      This follows the same single-row simplification as G3.  It should be
+      treated as a compact heuristic rather than as a complete structural
+      diagnostic.
     """
     diag   = np.real(np.diag(H))
     radii  = np.sum(np.abs(H), axis=1) - np.abs(diag)
@@ -276,7 +234,7 @@ def inspect_molecule(mol_name, npz_path, charge=0):
     g2   = compute_g2(H)
     g3   = compute_g3(H)
     g4   = compute_g4(H)
-    gap  = eigvals[1] - eigvals[0]
+    gap  = float(eigvals[1] - eigvals[0]) if len(eigvals) > 1 else float("nan")
     top5 = eigvals[:5] + energy_shift
 
     # ── Print ──────────────────────────────────────────────────────────────────
@@ -337,37 +295,12 @@ MOLECULES = [
     # L4: Representation
     ("H2_Stretch",  "L4_H2_Stretch_4q_geom_H_.0_.0_0.0;_H_.0_.0_2.5_jordan_wigner.npz",     0),
     ("H3_Linear",   "L4_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz", +1),
-    ("H2O",         "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_0.757_0.586;_H_.0_-0.757_0.586_jordan_wigner.npz", 0),
+    ("H2O",         "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_1.186_0.918;_H_.0_-1.186_0.918_jordan_wigner.npz", 0),
     # L5: Topology
     ("H4_Chain",    "L5_H4_Chain_8q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0;_H_.0_.0_3.0_jordan_wigner.npz", 0),
     # L6: Scalability
     ("BeH2",        "L6_BeH2_Scalability_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz", 0),
 ]
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-neutral_results = []
-charged_results = []
-
-print("\n" + "#"*70)
-print("  NEUTRAL MOLECULES (charge = 0)  — FULL-SPACE fingerprints")
-print("#"*70)
-for name, fname, charge in MOLECULES:
-    if charge == 0:
-        result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
-        if result:
-            neutral_results.append(result)
-
-print("\n" + "#"*70)
-print("  CHARGED MOLECULES (charge != 0) — FULL-SPACE fingerprints")
-print("#"*70)
-for name, fname, charge in MOLECULES:
-    if charge != 0:
-        result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
-        if result:
-            charged_results.append(result)
-
-# ── Helper for summary rows ────────────────────────────────────────────────────
 
 def _fmt(v):
     if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
@@ -386,15 +319,42 @@ def _print_summary(results, title):
               f"  {_fmt(r['z_ratio'])}  {_fmt(r['high_order'])}"
               f"  {_fmt(r['g1'])}  {_fmt(r['g2'])}  {_fmt(r['g3'])}  {r['g4']:7.3f}")
 
-_print_summary(neutral_results, "SUMMARY — NEUTRAL  (full-space / unrestricted)")
-_print_summary(charged_results, "SUMMARY — CHARGED  (full-space, may be wrong sector)")
 
-# ── G3 stability check for neutral molecules ───────────────────────────────────
-print(f"\n{'='*85}")
-print("  G3 STABILITY CHECK (neutral molecules only)")
-print(f"{'='*85}")
-print("  Rows with G3=inf indicate the min-diagonal basis state has R_i ~ 0")
-print("  (purely diagonal row — no off-diagonal coupling — G3 uninformative)\n")
-for r in neutral_results:
-    status = "*** UNSTABLE (inf)" if np.isinf(r['g3']) else f"{r['g3']:.4f}"
-    print(f"  {r['molecule']:<14}  G3 = {status}")
+def main():
+    """Run the full-space fingerprint report for the benchmark molecules."""
+    neutral_results = []
+    charged_results = []
+
+    print("\n" + "#"*70)
+    print("  NEUTRAL MOLECULES (charge = 0)  — FULL-SPACE fingerprints")
+    print("#"*70)
+    for name, fname, charge in MOLECULES:
+        if charge == 0:
+            result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
+            if result:
+                neutral_results.append(result)
+
+    print("\n" + "#"*70)
+    print("  CHARGED MOLECULES (charge != 0) — FULL-SPACE fingerprints")
+    print("#"*70)
+    for name, fname, charge in MOLECULES:
+        if charge != 0:
+            result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
+            if result:
+                charged_results.append(result)
+
+    _print_summary(neutral_results, "SUMMARY — NEUTRAL  (full-space / unrestricted)")
+    _print_summary(charged_results, "SUMMARY — CHARGED  (full-space, may be wrong sector)")
+
+    print(f"\n{'='*85}")
+    print("  G3 STABILITY CHECK (neutral molecules only)")
+    print(f"{'='*85}")
+    print("  Rows with G3=inf indicate the min-diagonal basis state has R_i ~ 0")
+    print("  (purely diagonal row — no off-diagonal coupling — G3 uninformative)\n")
+    for r in neutral_results:
+        status = "*** UNSTABLE (inf)" if np.isinf(r['g3']) else f"{r['g3']:.4f}"
+        print(f"  {r['molecule']:<14}  G3 = {status}")
+
+
+if __name__ == "__main__":
+    main()

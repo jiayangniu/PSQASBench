@@ -1,16 +1,57 @@
+"""Generate benchmark molecular Hamiltonians in the full qubit Hilbert space.
+
+The saved `.npz` files contain:
+  - the electronic Hamiltonian matrix (the scalar identity shift is stored separately),
+  - the Pauli-decomposition coefficients and operator strings,
+  - the exact eigenvalues of the full, unrestricted qubit-space Hamiltonian.
+
+These files are convenient for QAS / VQE experiments that work directly in the
+full computational basis.  For spectra restricted to a fixed particle-number
+and spin sector, see `prepare_molecules_physical.py`.
+"""
+
 import pennylane as qml
 from pennylane import qchem
 import numpy as np
 from pathlib import Path
 
 MOL_DATA_DIR = Path(__file__).resolve().parent.parent / "mol_data"
+MOL_DATA_DIR.mkdir(exist_ok=True)
 
 
 def generate_mol_data_for_rl(mol_name, symbols, coordinates_angstrom,
                              active_electrons, active_orbitals,
                              geometry_str, mapping='jordan_wigner',
                              charge=0, mult=1):
-    """Generate .npz mol data and return the ground-state total energy for config."""
+    """Build and save one benchmark molecule in the full qubit space.
+
+    Parameters
+    ----------
+    mol_name : str
+        Molecule label used in the output filename.
+    symbols : list[str]
+        Atomic symbols in the same order as `coordinates_angstrom`.
+    coordinates_angstrom : np.ndarray
+        Cartesian geometry in Angstrom with shape `(n_atoms, 3)`.
+    active_electrons : int
+        Number of electrons retained in the active space.
+    active_orbitals : int
+        Number of spatial orbitals retained in the active space.
+    geometry_str : str
+        Human-readable geometry tag copied into the filename for traceability.
+    mapping : str, optional
+        Fermion-to-qubit mapping passed to PennyLane.
+    charge : int, optional
+        Total molecular charge.
+    mult : int, optional
+        Spin multiplicity `2S + 1`.
+
+    Returns
+    -------
+    float
+        Ground-state total energy, i.e. the minimum electronic eigenvalue plus
+        the stored scalar identity shift.
+    """
     coordinates_bohr = coordinates_angstrom * 1.8897259886
 
     H, qubits = qchem.molecular_hamiltonian(
@@ -30,7 +71,8 @@ def generate_mol_data_for_rl(mol_name, symbols, coordinates_angstrom,
             electronic_coeffs.append(float(coeff))
             electronic_ops.append(op)
 
-    # build full matrix and diagonalise for exact eigenvalues
+    # Keep the saved matrix purely electronic and store the scalar shift
+    # separately so downstream code can decide when to add it back.
     dim = 2 ** qubits
     ham_mat = np.zeros((dim, dim), dtype=np.complex128)
     for c, o in zip(electronic_coeffs, electronic_ops):
@@ -50,106 +92,110 @@ def generate_mol_data_for_rl(mol_name, symbols, coordinates_angstrom,
              energy_shift=energy_shift)
 
     print(f"[OK] {mol_name}  saved -> {filename}")
-    print(f"     fake_min_energy = {total_ground_energy:.8f}\n")
+    print(f"     ground_state_energy = {total_ground_energy:.8f}\n")
 
     return total_ground_energy
 
 
-# =================================================================
-# 6-Tier Molecular Diagnostic Suite  (tier definitions in CLAUDE.md)
-# =================================================================
+# ==========================================================
+# Benchmark molecule definitions grouped by benchmark level
+# ==========================================================
 
 # --- L1: Minimalism ---
 geom_h2_equil = "H .0 .0 0.0; H .0 .0 0.735"
-generate_mol_data_for_rl(
-    "L1_H2_Equil", ["H", "H"], np.array([[0,0,0],[0,0,0.735]]),
-    2, 2, geometry_str=geom_h2_equil
-)
+# generate_mol_data_for_rl(
+#     "L1_H2_Equil", ["H", "H"], np.array([[0,0,0],[0,0,0.735]]),
+#     2, 2, geometry_str=geom_h2_equil
+# )
 
 geom_bh = "B .0 .0 0.0; H .0 .0 1.232"
-generate_mol_data_for_rl(
-    "L1_BH", ["B", "H"], np.array([[0,0,0],[0,0,1.232]]),
-    2, 3, geometry_str=geom_bh
-)
+# generate_mol_data_for_rl(
+#     "L1_BH", ["B", "H"], np.array([[0,0,0],[0,0,1.232]]),
+#     2, 3, geometry_str=geom_bh
+# )
 
 # --- L2: Asymmetry ---
 geom_beh_plus = "Be .0 .0 0.0; H .0 .0 1.312"
-generate_mol_data_for_rl(
-    "L2_BeH_Plus", ["Be", "H"], np.array([[0,0,0],[0,0,1.312]]),
-    2, 2, geometry_str=geom_beh_plus, charge=1
-)
+# generate_mol_data_for_rl(
+#     "L2_BeH_Plus", ["Be", "H"], np.array([[0,0,0],[0,0,1.312]]),
+#     2, 2, geometry_str=geom_beh_plus, charge=1
+# )
 
 geom_lih_equil = "Li .0 .0 0.0; H .0 .0 1.595"
-generate_mol_data_for_rl(
-    "L2_LiH_Equil", ["Li", "H"], np.array([[0,0,0],[0,0,1.595]]),
-    2, 3, geometry_str=geom_lih_equil
-)
+# generate_mol_data_for_rl(
+#     "L2_LiH_Equil", ["Li", "H"], np.array([[0,0,0],[0,0,1.595]]),
+#     2, 3, geometry_str=geom_lih_equil
+# )
 
 geom_bf = "B .0 .0 0.0; F .0 .0 1.267"
-generate_mol_data_for_rl(
-    "L2_BF", ["B", "F"], np.array([[0,0,0],[0,0,1.267]]),
-    6, 4, geometry_str=geom_bf
-)
+# generate_mol_data_for_rl(
+#     "L2_BF", ["B", "F"], np.array([[0,0,0],[0,0,1.267]]),
+#     6, 4, geometry_str=geom_bf
+# )
 
 # --- L3: Stability ---
 geom_heh_plus = "He .0 .0 0.0; H .0 .0 0.774"
-generate_mol_data_for_rl(
-    "L3_HeH_Plus", ["He", "H"], np.array([[0,0,0],[0,0,0.774]]),
-    2, 2, geometry_str=geom_heh_plus, charge=1
-)
+# generate_mol_data_for_rl(
+#     "L3_HeH_Plus", ["He", "H"], np.array([[0,0,0],[0,0,0.774]]),
+#     2, 2, geometry_str=geom_heh_plus, charge=1
+# )
 
 geom_ch2 = "C .0 .0 0.0; H .0 0.86 0.73; H .0 -0.86 0.73"
-generate_mol_data_for_rl(
-    "L3_CH2_Singlet", ["C", "H", "H"], np.array([[0,0,0],[0,0.86,0.73],[0,-0.86,0.73]]),
-    2, 3, geometry_str=geom_ch2
-)
+# generate_mol_data_for_rl(
+#     "L3_CH2_Singlet", ["C", "H", "H"], np.array([[0,0,0],[0,0.86,0.73],[0,-0.86,0.73]]),
+#     2, 3, geometry_str=geom_ch2
+# )
 
 geom_lih_stretch = "Li .0 .0 0.0; H .0 .0 3.500"
-generate_mol_data_for_rl(
-    "L3_LiH_Stretch", ["Li", "H"], np.array([[0,0,0],[0,0,3.500]]),
-    2, 3, geometry_str=geom_lih_stretch
-)
+# generate_mol_data_for_rl(
+#     "L3_LiH_Stretch", ["Li", "H"], np.array([[0,0,0],[0,0,3.500]]),
+#     2, 3, geometry_str=geom_lih_stretch
+# )
 
 geom_h3_triangle = "H .0 .0 0.0; H 1.0 .0 0.0; H 0.5 0.866 0.0"
-generate_mol_data_for_rl(
-    "L3_H3_Triangle", ["H", "H", "H"], np.array([[0,0,0],[1,0,0],[0.5,0.866,0]]),
-    2, 3, geometry_str=geom_h3_triangle, charge=1
-)
+# generate_mol_data_for_rl(
+#     "L3_H3_Triangle", ["H", "H", "H"], np.array([[0,0,0],[1,0,0],[0.5,0.866,0]]),
+#     2, 3, geometry_str=geom_h3_triangle, charge=1
+# )
 
 # --- L4: Representation ---
 geom_h2_stretch = "H .0 .0 0.0; H .0 .0 2.5"
-generate_mol_data_for_rl(
-    "L4_H2_Stretch", ["H", "H"], np.array([[0,0,0],[0,0,2.5]]),
-    2, 2, geometry_str=geom_h2_stretch
-)
+# generate_mol_data_for_rl(
+#     "L4_H2_Stretch", ["H", "H"], np.array([[0,0,0],[0,0,2.5]]),
+#     2, 2, geometry_str=geom_h2_stretch
+# )
 
 geom_h3_linear = "H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0"
-generate_mol_data_for_rl(
-    "L4_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
-    2, 3, geometry_str=geom_h3_linear, charge=1
-)
+# generate_mol_data_for_rl(
+#     "L4_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
+#     2, 3, geometry_str=geom_h3_linear, charge=1
+# )
 
-geom_h2o = "O .0 .0 0.0; H .0 0.757 0.586; H .0 -0.757 0.586"
-generate_mol_data_for_rl(
-    "L4_H2O_StrongCorr", ["O", "H", "H"], np.array([[0,0,0],[0,0.757,0.586],[0,-0.757,0.586]]),
-    4, 4, geometry_str=geom_h2o
-)
+# For the shared snapshot we keep only the L4 strong-correlation water case
+# active by default.  Uncomment any additional calls above if you want to
+# regenerate the broader benchmark collection from this script.
+geom_h2o = "O .0 .0 0.0; H .0 1.186 0.918; H .0 -1.186 0.918"
+if __name__ == "__main__":
+    generate_mol_data_for_rl(
+        "L4_H2O_StrongCorr", ["O", "H", "H"], np.array([[0,0,0],[0,1.186,0.918],[0,-1.186,0.918]]),
+        4, 4, geometry_str=geom_h2o
+    )
 
 # --- L5: Topology (same geometry as L4 H3/H4, but restricted to 1D nearest-neighbor at runtime) ---
-generate_mol_data_for_rl(
-    "L5_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
-    2, 3, geometry_str=geom_h3_linear, charge=1
-)
+# generate_mol_data_for_rl(
+#     "L5_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
+#     2, 3, geometry_str=geom_h3_linear, charge=1
+# )
 
 geom_h4_chain = "H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0; H .0 .0 3.0"
-generate_mol_data_for_rl(
-    "L5_H4_Chain", ["H", "H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2],[0,0,3]]),
-    4, 4, geometry_str=geom_h4_chain
-)
+# generate_mol_data_for_rl(
+#     "L5_H4_Chain", ["H", "H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2],[0,0,3]]),
+#     4, 4, geometry_str=geom_h4_chain
+# )
 
 # --- L6: Scalability ---
 geom_beh2 = "Be .0 .0 0.0; H .0 .0 1.326; H .0 .0 -1.326"
-generate_mol_data_for_rl(
-    "L6_BeH2_Scalability", ["Be", "H", "H"], np.array([[0,0,0],[0,0,1.326],[0,0,-1.326]]),
-    2, 5, geometry_str=geom_beh2
-)
+# generate_mol_data_for_rl(
+#     "L6_BeH2_Scalability", ["Be", "H", "H"], np.array([[0,0,0],[0,0,1.326],[0,0,-1.326]]),
+#     2, 5, geometry_str=geom_beh2
+# )

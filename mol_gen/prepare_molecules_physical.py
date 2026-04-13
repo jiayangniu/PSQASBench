@@ -1,46 +1,24 @@
-"""
-prepare_molecules_physical.py
+"""Generate benchmark Hamiltonians with spectra restricted to a physical sector.
 
-Generates molecular Hamiltonian data restricted to the physically correct
-particle-number and spin sector.
+This script stores the same full qubit-space Hamiltonian matrix as
+`prepare_molecules.py`, but it replaces `eigvals` with eigenvalues computed in
+the target particle-number / spin sector.  The resulting low-energy spectrum is
+therefore aligned with the intended charge and multiplicity of the molecule.
 
-Problem with the original prepare_molecules.py
------------------------------------------------
-The original code diagonalises the full 2^n x 2^n Hamiltonian matrix, which
-includes ALL possible electron counts (0, 1, 2, ..., n_qubits electrons).
-For charged molecules this means the stored eigvals[0] can correspond to a
-different charge state than intended.  For all molecules the stored eigenvalues
-mix different spin sectors (Sz values), introducing artificial degeneracies.
-
-What this script does differently
-----------------------------------
-After building the full Hamiltonian matrix we project onto the sub-space
-defined by:
-    - exactly n_alpha alpha (spin-up) electrons
-    - exactly n_beta  beta  (spin-down) electrons
-
-For a singlet ground state: n_alpha = n_beta = active_electrons // 2.
-
-PennyLane JW spin-orbital convention (verified empirically):
-    qubit index 0, 2, 4, ... -> alpha (spin-up)  orbitals
-    qubit index 1, 3, 5, ... -> beta  (spin-down) orbitals
-    Qubit 0 = leftmost character in the format() bit string.
-
-Output format (.npz)
---------------------
-    hamiltonian    : full 2^n x 2^n matrix (same as original; used by VQE)
-    weights        : Pauli coefficients
-    pauli_strings  : Pauli operator strings
-    eigvals        : eigenvalues in the PHYSICAL sector (n_alpha, n_beta)
-    eigvals_full   : eigenvalues of the full (unrestricted) Hamiltonian
-    energy_shift   : nuclear repulsion energy
-    n_electrons    : active_electrons
-    n_alpha        : number of spin-up electrons in the target sector
-    n_beta         : number of spin-down electrons in the target sector
-    sector_indices : indices (in the full 2^n basis) of the physical sector states
-
-e0_full   = eigvals_full[0] + energy_shift   # may correspond to wrong charge
-e0_sector = eigvals[0]      + energy_shift   # physically correct ground state
+Saved `.npz` fields
+-------------------
+`hamiltonian`
+    Full electronic Hamiltonian matrix in the qubit basis.
+`weights`, `pauli_strings`
+    Pauli-decomposition data for downstream diagnostics.
+`eigvals`
+    Eigenvalues inside the selected `(n_alpha, n_beta)` sector.
+`eigvals_full`
+    Eigenvalues of the unrestricted full-space Hamiltonian.
+`energy_shift`
+    Scalar identity contribution separated from the electronic matrix.
+`n_electrons`, `n_alpha`, `n_beta`, `sector_indices`
+    Metadata describing the physical sector used for the projection.
 """
 
 import pennylane as qml
@@ -59,10 +37,10 @@ def get_sector_indices(n_qubits, n_alpha, n_beta):
     Return the indices (in the full 2^n_qubits computational basis) of all
     states that have exactly n_alpha alpha electrons and n_beta beta electrons.
 
-    PennyLane JW convention:
-        qubit j occupancy = int(format(i, '0{n}b')[j])   (qubit 0 = leftmost)
-        even-j qubits (0, 2, 4, ...) -> alpha spin-orbitals
-        odd-j  qubits (1, 3, 5, ...) -> beta  spin-orbitals
+    PennyLane's Jordan-Wigner spin-orbital ordering is assumed:
+      - even qubits  (0, 2, 4, ...) encode alpha spin-orbitals
+      - odd qubits   (1, 3, 5, ...) encode beta spin-orbitals
+      - qubit 0 corresponds to the leftmost bit of `format(i, f"0{n}b")`
     """
     indices = []
     for i in range(2 ** n_qubits):
@@ -81,19 +59,17 @@ def generate_mol_data_physical(mol_name, symbols, coordinates_angstrom,
                                geometry_str, mapping='jordan_wigner',
                                charge=0, mult=1):
     """
-    Generate .npz mol data with eigenvalues restricted to the correct
-    particle-number and spin sector.
+    Build and save one benchmark molecule with a sector-restricted spectrum.
 
     Parameters
     ----------
     active_electrons : int
-        Number of electrons in the active space.  Must be even for singlet (mult=1).
-    active_orbitals  : int
+        Number of electrons in the active space.
+    active_orbitals : int
         Number of spatial orbitals in the active space.
-        Results in n_qubits = 2 * active_orbitals.
     mult : int
-        Spin multiplicity (2S+1).  Only singlet (mult=1) is fully supported;
-        for doublets the sector is n_alpha = n_beta + 1.
+        Spin multiplicity `2S + 1`.  Singlets and simple doublets are the main
+        use cases for this script.
     """
     assert active_electrons % 2 == 0 or mult != 1, \
         "Singlet requires even number of active electrons."
@@ -123,12 +99,12 @@ def generate_mol_data_physical(mol_name, symbols, coordinates_angstrom,
     for c, o in zip(electronic_coeffs, electronic_ops):
         ham_mat += c * qml.matrix(o, wire_order=range(n_qubits))
 
-    # ── Full-space eigenvalues (original, possibly unphysical) ────────────────
+    # Full-space eigenvalues are stored for comparison with the restricted
+    # physical sector used by the benchmark metadata.
     eigvals_full = np.linalg.eigh(ham_mat)[0]
 
-    # ── Physical sector: correct particle number + spin ───────────────────────
-    # For singlet: n_alpha = n_beta = n_electrons / 2
-    # For doublet: n_alpha = n_beta + 1  (higher Sz = +1/2 component chosen)
+    # Choose the target `(n_alpha, n_beta)` sector implied by the charge and
+    # spin multiplicity.  For doublets we keep the `Sz = +1/2` component.
     if mult == 1:
         n_alpha = active_electrons // 2
         n_beta  = active_electrons // 2
@@ -139,7 +115,7 @@ def generate_mol_data_physical(mol_name, symbols, coordinates_angstrom,
 
     sector_indices = get_sector_indices(n_qubits, n_alpha, n_beta)
     H_sector = ham_mat[np.ix_(sector_indices, sector_indices)]
-    eigvals_sector = np.linalg.eigh(np.real(H_sector))[0]   # sector H is real
+    eigvals_sector = np.linalg.eigvalsh(H_sector).real
 
     # ── Print summary ─────────────────────────────────────────────────────────
     e0_full   = eigvals_full[0]   + energy_shift
@@ -171,100 +147,108 @@ def generate_mol_data_physical(mol_name, symbols, coordinates_angstrom,
     return e0_sector
 
 
-# ── Molecule list (mirrors prepare_molecules.py exactly) ──────────────────────
+def main():
+    """Generate the physical-sector benchmark collection."""
 
-# --- L1: Minimalism ---
-e = generate_mol_data_physical(
-    "L1_H2_Equil", ["H", "H"], np.array([[0,0,0],[0,0,0.735]]),
-    active_electrons=2, active_orbitals=2,
-    geometry_str="H .0 .0 0.0; H .0 .0 0.735"
-)
+    # The molecule list mirrors `prepare_molecules.py`, but the stored
+    # eigenvalues come from the sector selected by `(n_alpha, n_beta)`.
 
-e = generate_mol_data_physical(
-    "L1_BH", ["B", "H"], np.array([[0,0,0],[0,0,1.232]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="B .0 .0 0.0; H .0 .0 1.232"
-)
+    # --- L1: Minimalism ---
+    generate_mol_data_physical(
+        "L1_H2_Equil", ["H", "H"], np.array([[0,0,0],[0,0,0.735]]),
+        active_electrons=2, active_orbitals=2,
+        geometry_str="H .0 .0 0.0; H .0 .0 0.735"
+    )
 
-# --- L2: Asymmetry ---
-e = generate_mol_data_physical(
-    "L2_BeH_Plus", ["Be", "H"], np.array([[0,0,0],[0,0,1.312]]),
-    active_electrons=2, active_orbitals=2,
-    geometry_str="Be .0 .0 0.0; H .0 .0 1.312", charge=1
-)
+    generate_mol_data_physical(
+        "L1_BH", ["B", "H"], np.array([[0,0,0],[0,0,1.232]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="B .0 .0 0.0; H .0 .0 1.232"
+    )
 
-e = generate_mol_data_physical(
-    "L2_LiH_Equil", ["Li", "H"], np.array([[0,0,0],[0,0,1.595]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="Li .0 .0 0.0; H .0 .0 1.595"
-)
+    # --- L2: Asymmetry ---
+    generate_mol_data_physical(
+        "L2_BeH_Plus", ["Be", "H"], np.array([[0,0,0],[0,0,1.312]]),
+        active_electrons=2, active_orbitals=2,
+        geometry_str="Be .0 .0 0.0; H .0 .0 1.312", charge=1
+    )
 
-e = generate_mol_data_physical(
-    "L2_BF", ["B", "F"], np.array([[0,0,0],[0,0,1.267]]),
-    active_electrons=6, active_orbitals=4,
-    geometry_str="B .0 .0 0.0; F .0 .0 1.267"
-)
+    generate_mol_data_physical(
+        "L2_LiH_Equil", ["Li", "H"], np.array([[0,0,0],[0,0,1.595]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="Li .0 .0 0.0; H .0 .0 1.595"
+    )
 
-# --- L3: Stability ---
-e = generate_mol_data_physical(
-    "L3_HeH_Plus", ["He", "H"], np.array([[0,0,0],[0,0,0.774]]),
-    active_electrons=2, active_orbitals=2,
-    geometry_str="He .0 .0 0.0; H .0 .0 0.774", charge=1
-)
+    generate_mol_data_physical(
+        "L2_BF", ["B", "F"], np.array([[0,0,0],[0,0,1.267]]),
+        active_electrons=6, active_orbitals=4,
+        geometry_str="B .0 .0 0.0; F .0 .0 1.267"
+    )
 
-e = generate_mol_data_physical(
-    "L3_CH2_Singlet", ["C", "H", "H"], np.array([[0,0,0],[0,0.86,0.73],[0,-0.86,0.73]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="C .0 .0 0.0; H .0 0.86 0.73; H .0 -0.86 0.73"
-)
+    # --- L3: Stability ---
+    generate_mol_data_physical(
+        "L3_HeH_Plus", ["He", "H"], np.array([[0,0,0],[0,0,0.774]]),
+        active_electrons=2, active_orbitals=2,
+        geometry_str="He .0 .0 0.0; H .0 .0 0.774", charge=1
+    )
 
-e = generate_mol_data_physical(
-    "L3_LiH_Stretch", ["Li", "H"], np.array([[0,0,0],[0,0,3.500]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="Li .0 .0 0.0; H .0 .0 3.500"
-)
+    generate_mol_data_physical(
+        "L3_CH2_Singlet", ["C", "H", "H"], np.array([[0,0,0],[0,0.86,0.73],[0,-0.86,0.73]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="C .0 .0 0.0; H .0 0.86 0.73; H .0 -0.86 0.73"
+    )
 
-e = generate_mol_data_physical(
-    "L3_H3_Triangle", ["H", "H", "H"], np.array([[0,0,0],[1,0,0],[0.5,0.866,0]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="H .0 .0 0.0; H 1.0 .0 0.0; H 0.5 0.866 0.0", charge=1
-)
+    generate_mol_data_physical(
+        "L3_LiH_Stretch", ["Li", "H"], np.array([[0,0,0],[0,0,3.500]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="Li .0 .0 0.0; H .0 .0 3.500"
+    )
 
-# --- L4: Representation ---
-e = generate_mol_data_physical(
-    "L4_H2_Stretch", ["H", "H"], np.array([[0,0,0],[0,0,2.5]]),
-    active_electrons=2, active_orbitals=2,
-    geometry_str="H .0 .0 0.0; H .0 .0 2.5"
-)
+    generate_mol_data_physical(
+        "L3_H3_Triangle", ["H", "H", "H"], np.array([[0,0,0],[1,0,0],[0.5,0.866,0]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="H .0 .0 0.0; H 1.0 .0 0.0; H 0.5 0.866 0.0", charge=1
+    )
 
-e = generate_mol_data_physical(
-    "L4_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0", charge=1
-)
+    # --- L4: Representation ---
+    generate_mol_data_physical(
+        "L4_H2_Stretch", ["H", "H"], np.array([[0,0,0],[0,0,2.5]]),
+        active_electrons=2, active_orbitals=2,
+        geometry_str="H .0 .0 0.0; H .0 .0 2.5"
+    )
 
-e = generate_mol_data_physical(
-    "L4_H2O_StrongCorr", ["O", "H", "H"], np.array([[0,0,0],[0,0.757,0.586],[0,-0.757,0.586]]),
-    active_electrons=4, active_orbitals=4,
-    geometry_str="O .0 .0 0.0; H .0 0.757 0.586; H .0 -0.757 0.586"
-)
+    generate_mol_data_physical(
+        "L4_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0", charge=1
+    )
 
-# --- L5: Topology ---
-e = generate_mol_data_physical(
-    "L5_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
-    active_electrons=2, active_orbitals=3,
-    geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0", charge=1
-)
+    generate_mol_data_physical(
+        "L4_H2O_StrongCorr", ["O", "H", "H"], np.array([[0,0,0],[0,1.186,0.918],[0,-1.186,0.918]]),
+        active_electrons=4, active_orbitals=4,
+        geometry_str="O .0 .0 0.0; H .0 1.186 0.918; H .0 -1.186 0.918"
+    )
 
-e = generate_mol_data_physical(
-    "L5_H4_Chain", ["H", "H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2],[0,0,3]]),
-    active_electrons=4, active_orbitals=4,
-    geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0; H .0 .0 3.0"
-)
+    # --- L5: Topology ---
+    generate_mol_data_physical(
+        "L5_H3_Linear", ["H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2]]),
+        active_electrons=2, active_orbitals=3,
+        geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0", charge=1
+    )
 
-# --- L6: Scalability ---
-e = generate_mol_data_physical(
-    "L6_BeH2_Scalability", ["Be", "H", "H"], np.array([[0,0,0],[0,0,1.326],[0,0,-1.326]]),
-    active_electrons=2, active_orbitals=5,
-    geometry_str="Be .0 .0 0.0; H .0 .0 1.326; H .0 .0 -1.326"
-)
+    generate_mol_data_physical(
+        "L5_H4_Chain", ["H", "H", "H", "H"], np.array([[0,0,0],[0,0,1],[0,0,2],[0,0,3]]),
+        active_electrons=4, active_orbitals=4,
+        geometry_str="H .0 .0 0.0; H .0 .0 1.0; H .0 .0 2.0; H .0 .0 3.0"
+    )
+
+    # --- L6: Scalability ---
+    generate_mol_data_physical(
+        "L6_BeH2_Scalability", ["Be", "H", "H"], np.array([[0,0,0],[0,0,1.326],[0,0,-1.326]]),
+        active_electrons=2, active_orbitals=5,
+        geometry_str="Be .0 .0 0.0; H .0 .0 1.326; H .0 .0 -1.326"
+    )
+
+
+if __name__ == "__main__":
+    main()

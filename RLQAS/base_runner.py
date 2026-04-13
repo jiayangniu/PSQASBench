@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from . import VQE as vc
+from .utils import count_rotation_gates
 
 
 class BaseRunner(ABC):
@@ -120,20 +121,42 @@ class BaseRunner(ABC):
         # SR / CNOT metrics — deterministic greedy policy
         greedy_rollouts = greedy_rollout_k(self.greedy_episode, env, K)
         metrics = aggregate_metrics(greedy_rollouts, accept_err)
+        best_rollout = min(greedy_rollouts, key=lambda r: r["energy_error"])
 
-        # PCD — stochastic policy, K different seeds
-        pcd_base_seed = ep  # different seed set at every eval checkpoint
-        stoch_rollouts = stochastic_rollout_k(
-            self.stochastic_episode, env, K, base_seed=pcd_base_seed
-        )
-        pcd = compute_pcd(
-            stoch_rollouts,
-            hamiltonian  = self.hamiltonian,
-            weights      = self.weights,
-            energy_shift = self.energy_shift,
-            reoptimize   = False,
-        )
-        return {**metrics, **pcd, "eval_episode": ep}
+        compute_pcd_flag = bool(int(self.config.get("general", {}).get("compute_pcd", 1)))
+        if compute_pcd_flag:
+            # PCD — stochastic policy, K different seeds
+            pcd_base_seed = ep  # different seed set at every eval checkpoint
+            stoch_rollouts = stochastic_rollout_k(
+                self.stochastic_episode, env, K, base_seed=pcd_base_seed
+            )
+            pcd = compute_pcd(
+                stoch_rollouts,
+                hamiltonian  = self.hamiltonian,
+                weights      = self.weights,
+                energy_shift = self.energy_shift,
+                reoptimize   = False,
+            )
+        else:
+            pcd = {
+                "D_struct": float("nan"),
+                "D_func": float("nan"),
+                "n_pairs": 0,
+            }
+        best_rollout_info = {
+            "best_rollout_energy": float(best_rollout.get("energy", float("nan"))),
+            "best_rollout_energy_error": float(best_rollout["energy_error"]),
+            "best_rollout_depth": int(best_rollout["steps"]),
+            "best_rollout_cnot_count": int(best_rollout["cnot_count"]),
+            "best_rollout_rotation_count": int(
+                best_rollout.get(
+                    "rotation_count",
+                    count_rotation_gates(best_rollout.get("op_history", [])),
+                )
+            ),
+            "best_rollout_op_history": list(best_rollout.get("op_history", [])),
+        }
+        return {**metrics, **pcd, **best_rollout_info, "eval_episode": ep}
 
     # ── Persistence ────────────────────────────────────────────────────────────
 

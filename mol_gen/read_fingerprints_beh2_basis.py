@@ -1,16 +1,12 @@
-"""
-Fingerprint analysis for the generated BeH2 basis-series dataset.
+"""Compute fingerprint metrics for the BeH2 basis-series dataset.
 
-This script reads .npz files from `mol_data_beh2_basis/` and computes the same
-full-space style descriptors used in the benchmark fingerprint scripts:
-  - energy gap
-  - hub score / asymmetry
-  - Z-only / XY-only / mixed ratios
-  - high-order ratio
-  - G1-G4 Gershgorin-style summaries
+The script prefers files under `mol_data_beh2_basis/`.  If that directory is
+empty, it falls back to the BeH2 files stored in `mol_data/`, which is useful
+while the dataset is being renamed or reorganized.
 
-Usage:
-  python mol_gen/read_fingerprints_beh2_basis.py
+For large sparse runs the generator may omit the dense Hamiltonian matrix; in
+that case the script still reports spectrum and Pauli-decomposition summaries,
+and prints `N/A` for the Gershgorin-style matrix metrics.
 """
 
 import numpy as np
@@ -19,10 +15,30 @@ from pathlib import Path
 
 np.set_printoptions(precision=4, suppress=True, linewidth=160)
 
-MOL_DATA_DIR = Path(__file__).resolve().parent.parent / "mol_data_beh2_basis"
+PRIMARY_DATA_DIR = Path(__file__).resolve().parent.parent / "mol_data_beh2_basis"
+FALLBACK_DATA_DIR = Path(__file__).resolve().parent.parent / "mol_data"
+FILE_PATTERNS = ("L1_BeH2_*.npz", "L6_BeH2_*.npz")
+
+
+def _discover_files():
+    """Return BeH2 basis-series files, preferring the dedicated data directory."""
+    for data_dir in (PRIMARY_DATA_DIR, FALLBACK_DATA_DIR):
+        files = []
+        seen = set()
+        if not data_dir.exists():
+            continue
+        for pattern in FILE_PATTERNS:
+            for path in sorted(data_dir.glob(pattern)):
+                if path.name not in seen:
+                    files.append(path)
+                    seen.add(path.name)
+        if files:
+            return files, data_dir
+    return [], PRIMARY_DATA_DIR
 
 
 def _wire_indices(op_str: str):
+    """Return qubit indices appearing in a PennyLane-style Pauli string."""
     wires, i = [], 0
     while i < len(op_str):
         if op_str[i] == "(":
@@ -34,6 +50,7 @@ def _wire_indices(op_str: str):
 
 
 def _pauli_category(op_str: str):
+    """Classify a Pauli string as Z-only, XY-only, mixed, or identity."""
     has_z = "Z(" in op_str
     has_xy = "X(" in op_str or "Y(" in op_str
     if not has_z and not has_xy:
@@ -46,6 +63,7 @@ def _pauli_category(op_str: str):
 
 
 def compute_pauli_metrics(weights, pauli_strings, n_qubits):
+    """Compute fingerprint metrics derived from the Pauli decomposition."""
     q_imp = np.zeros(n_qubits)
     w_total = 0.0
     w_z = w_xy = w_mixed = 0.0
@@ -82,12 +100,14 @@ def compute_pauli_metrics(weights, pauli_strings, n_qubits):
 
 
 def compute_g1(H):
+    """Fraction of rows satisfying the Gershgorin diagonal-dominance test."""
     diag = np.real(np.diag(H))
     radii = np.sum(np.abs(H), axis=1) - np.abs(diag)
     return float(np.sum(np.abs(diag) >= radii)) / H.shape[0]
 
 
 def compute_g2(H):
+    """Worst-case diagonal-dominance ratio across all rows."""
     diag = np.real(np.diag(H))
     radii = np.sum(np.abs(H), axis=1) - np.abs(diag)
     mask = radii > 0
@@ -97,6 +117,7 @@ def compute_g2(H):
 
 
 def compute_g3(H):
+    """Diagonal-dominance ratio on the minimum-diagonal row."""
     diag = np.real(np.diag(H))
     radii = np.sum(np.abs(H), axis=1) - np.abs(diag)
     i_star = int(np.argmin(diag))
@@ -107,6 +128,7 @@ def compute_g3(H):
 
 
 def compute_g4(H):
+    """Separation between the candidate ground-state disc and the rest."""
     diag = np.real(np.diag(H))
     radii = np.sum(np.abs(H), axis=1) - np.abs(diag)
     i_star = int(np.argmin(diag))
@@ -119,7 +141,7 @@ def compute_g4(H):
 
 def inspect_file(npz_path: Path):
     data = np.load(npz_path, allow_pickle=True)
-    H = data["hamiltonian"]
+    H = data["hamiltonian"] if "hamiltonian" in data else None
     eigvals = data["eigvals"]
     weights = data["weights"]
     pauli_strings = data["pauli_strings"]
@@ -130,12 +152,22 @@ def inspect_file(npz_path: Path):
     energy_shift = float(data.get("energy_shift", 0.0))
 
     pm = compute_pauli_metrics(weights, pauli_strings, n_qubits)
-    g1 = compute_g1(H)
-    g2 = compute_g2(H)
-    g3 = compute_g3(H)
-    g4 = compute_g4(H)
+    if H is not None:
+        g1 = compute_g1(H)
+        g2 = compute_g2(H)
+        g3 = compute_g3(H)
+        g4 = compute_g4(H)
+    else:
+        g1 = g2 = g3 = g4 = float("nan")
     gap = float(eigvals[1] - eigvals[0]) if len(eigvals) > 1 else float("nan")
     top5 = eigvals[:5] + energy_shift
+
+    def _metric_text(value):
+        if np.isnan(value):
+            return "N/A"
+        if np.isinf(value):
+            return "inf"
+        return f"{value:.4f}"
 
     print(f"\n{'=' * 70}")
     print(f"  {npz_path.stem}")
@@ -151,11 +183,13 @@ def inspect_file(npz_path: Path):
     print(f"  XY-only            = {pm['xy_ratio']:.4f}")
     print(f"  Mixed              = {pm['mixed_ratio']:.4f}")
     print(f"  High-order ratio   = {pm['high_order_ratio']:.4f}")
-    print(f"  G1                 = {g1:.4f}")
-    print(f"  G2                 = {'inf' if np.isinf(g2) else f'{g2:.4f}'}")
-    print(f"  G3                 = {'inf' if np.isinf(g3) else f'{g3:.4f}'}")
-    print(f"  G4                 = {g4:.4f}")
+    print(f"  G1                 = {_metric_text(g1)}")
+    print(f"  G2                 = {_metric_text(g2)}")
+    print(f"  G3                 = {_metric_text(g3)}")
+    print(f"  G4                 = {_metric_text(g4)}")
     print(f"  Top-5 energies     = {top5}")
+    if H is None:
+        print("  Note               = dense Hamiltonian not stored; G1-G4 unavailable")
 
     return dict(
         molecule=npz_path.stem,
@@ -180,13 +214,18 @@ def _fmt(v):
 
 
 def main():
-    files = sorted(MOL_DATA_DIR.glob("*.npz"))
+    files, data_dir = _discover_files()
     if not files:
-        print(f"No .npz files found in {MOL_DATA_DIR}")
+        print(
+            "No BeH2 basis-series .npz files found in "
+            f"{PRIMARY_DATA_DIR} or {FALLBACK_DATA_DIR}"
+        )
         return
 
     results = [inspect_file(path) for path in files]
-    results.sort(key=lambda r: r["qubits"])
+    results.sort(key=lambda r: (r["qubits"], r["basis"], r["molecule"]))
+
+    print(f"Reading files from: {data_dir}")
 
     print(f"\n{'=' * 96}")
     print("  SUMMARY — BeH2 basis series")
@@ -200,7 +239,7 @@ def main():
         print(
             f"  {r['molecule']:<28} {r['basis']:<10} {r['qubits']:>2}  {r['gap01']:>8.4f}  "
             f"{_fmt(r['asymmetry'])}  {_fmt(r['z_ratio'])}  {_fmt(r['high_order'])}  "
-            f"{_fmt(r['g1'])}  {_fmt(r['g2'])}  {_fmt(r['g3'])}  {r['g4']:7.3f}"
+            f"{_fmt(r['g1'])}  {_fmt(r['g2'])}  {_fmt(r['g3'])}  {_fmt(r['g4'])}"
         )
 
 

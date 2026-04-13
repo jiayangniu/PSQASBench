@@ -1,16 +1,9 @@
-"""
-Hamiltonian Fingerprint Analysis for QAS Benchmarking (physical-sector version).
+"""Compute fingerprint metrics for the sector-restricted benchmark Hamiltonians.
 
-This script reads `mol_data_physical/` and computes fingerprint metrics on the
-projected physical-sector Hamiltonian H_sector defined by the stored
-particle-number / spin-sector indices.
-
-Pauli-decomposition metrics (hub score, Z-ratio, high-order ratio, etc.) are
-still computed from the original Pauli expansion stored in the file.  The
-Gershgorin metrics G1-G4 and the printed energy gap are computed on H_sector.
-
-Usage:
-  python read_fingerprints_physical.py
+The script reads `.npz` files from `mol_data_physical/`.  Pauli-decomposition
+metrics are computed from the stored Pauli expansion, while the energy gap and
+Gershgorin-style matrix metrics are evaluated on the projected physical-sector
+Hamiltonian defined by `sector_indices`.
 """
 
 import numpy as np
@@ -154,7 +147,7 @@ def inspect_molecule(mol_name, npz_path, charge=0):
     g2 = compute_g2(H)
     g3 = compute_g3(H)
     g4 = compute_g4(H)
-    gap = eigvals[1] - eigvals[0]
+    gap = float(eigvals[1] - eigvals[0]) if len(eigvals) > 1 else float("nan")
     top5 = eigvals[:5] + energy_shift
 
     miss = "  [! no pauli_strings]" if pauli_strings is None else ""
@@ -223,7 +216,7 @@ MOLECULES = [
     ("H3_Triangle", "L3_H3_Triangle_6q_geom_H_.0_.0_0.0;_H_1.0_.0_0.0;_H_0.5_0.866_0.0_jordan_wigner.npz", +1),
     ("H2_Stretch", "L4_H2_Stretch_4q_geom_H_.0_.0_0.0;_H_.0_.0_2.5_jordan_wigner.npz", 0),
     ("H3_Linear", "L4_H3_Linear_6q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0_jordan_wigner.npz", +1),
-    ("H2O", "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_0.757_0.586;_H_.0_-0.757_0.586_jordan_wigner.npz", 0),
+    ("H2O", "L4_H2O_StrongCorr_8q_geom_O_.0_.0_0.0;_H_.0_1.186_0.918;_H_.0_-1.186_0.918_jordan_wigner.npz", 0),
     ("H4_Chain", "L5_H4_Chain_8q_geom_H_.0_.0_0.0;_H_.0_.0_1.0;_H_.0_.0_2.0;_H_.0_.0_3.0_jordan_wigner.npz", 0),
     ("BeH2", "L6_BeH2_Scalability_10q_geom_Be_.0_.0_0.0;_H_.0_.0_1.326;_H_.0_.0_-1.326_jordan_wigner.npz", 0),
 ]
@@ -252,35 +245,41 @@ def _print_summary(results, title):
         )
 
 
-neutral_results = []
-charged_results = []
+def main():
+    """Run the physical-sector fingerprint report for the benchmark molecules."""
+    neutral_results = []
+    charged_results = []
 
-print("\n" + "#" * 70)
-print("  NEUTRAL MOLECULES (charge = 0)  — PHYSICAL-SECTOR fingerprints")
-print("#" * 70)
-for name, fname, charge in MOLECULES:
-    if charge == 0:
-        result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
-        if result:
-            neutral_results.append(result)
+    print("\n" + "#" * 70)
+    print("  NEUTRAL MOLECULES (charge = 0)  — PHYSICAL-SECTOR fingerprints")
+    print("#" * 70)
+    for name, fname, charge in MOLECULES:
+        if charge == 0:
+            result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
+            if result:
+                neutral_results.append(result)
 
-print("\n" + "#" * 70)
-print("  CHARGED MOLECULES (charge != 0) — PHYSICAL-SECTOR fingerprints")
-print("#" * 70)
-for name, fname, charge in MOLECULES:
-    if charge != 0:
-        result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
-        if result:
-            charged_results.append(result)
+    print("\n" + "#" * 70)
+    print("  CHARGED MOLECULES (charge != 0) — PHYSICAL-SECTOR fingerprints")
+    print("#" * 70)
+    for name, fname, charge in MOLECULES:
+        if charge != 0:
+            result = inspect_molecule(name, MOL_DATA_DIR / fname, charge=charge)
+            if result:
+                charged_results.append(result)
 
-_print_summary(neutral_results, "SUMMARY — NEUTRAL  (physical sector)")
-_print_summary(charged_results, "SUMMARY — CHARGED  (physical sector)")
+    _print_summary(neutral_results, "SUMMARY — NEUTRAL  (physical sector)")
+    _print_summary(charged_results, "SUMMARY — CHARGED  (physical sector)")
 
-print(f"\n{'='*85}")
-print("  G3 STABILITY CHECK (physical sector)")
-print(f"{'='*85}")
-print("  Rows with G3=inf indicate the min-diagonal basis state has R_i ~ 0")
-print("  (purely diagonal row — no off-diagonal coupling — G3 uninformative)\n")
-for r in neutral_results + charged_results:
-    status = "*** UNSTABLE (inf)" if np.isinf(r["g3"]) else f"{r['g3']:.4f}"
-    print(f"  {r['molecule']:<14}  G3 = {status}")
+    print(f"\n{'='*85}")
+    print("  G3 STABILITY CHECK (physical sector)")
+    print(f"{'='*85}")
+    print("  Rows with G3=inf indicate the min-diagonal basis state has R_i ~ 0")
+    print("  (purely diagonal row — no off-diagonal coupling — G3 uninformative)\n")
+    for r in neutral_results + charged_results:
+        status = "*** UNSTABLE (inf)" if np.isinf(r["g3"]) else f"{r['g3']:.4f}"
+        print(f"  {r['molecule']:<14}  G3 = {status}")
+
+
+if __name__ == "__main__":
+    main()

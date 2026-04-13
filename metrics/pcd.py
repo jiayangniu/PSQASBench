@@ -1,19 +1,26 @@
 """
 Policy Circuit Diversity (PCD) metrics for PSQASBench.
 
-Two complementary metrics, both based on Hilbert-Schmidt (HS) distance:
+Two complementary metrics, both based on output-state fidelity distance:
 
-    D_struct  Structural diversity of the CNOT skeleton.
-              Rotation angles are fixed to π/4 before computing the unitary,
-              so only the gate topology contributes.
+    D_struct  Structural diversity with all rotation angles fixed to π/4.
+              This suppresses per-run angle optimisation and measures how much
+              circuit structure alone changes the prepared state.
 
-    D_func    Functional diversity of the optimised circuits.
-              Each rollout's final COBYLA-optimised angles are used directly
-              (no re-optimisation by default; see `reoptimize` flag).
+    D_func    Functional diversity of the final optimised circuits.
+              Each rollout's learned/optimised angles are used directly
+              (or optionally re-optimised once more; see `reoptimize` flag).
+
+For two pure states |psi_i>, |psi_j>, we use
+
+    d_state = 1 - |<psi_i | psi_j>|^2
+
+which lies in [0, 1], is invariant to global phase, and scales to larger
+qubit counts much better than full-unitary comparisons.
 
 Diagnostic matrix:
     D_struct low  + D_func low   → ideal: consistent structure, stable optimisation
-    D_struct high + D_func low   → acceptable: equivalent circuits (Hamiltonian symmetry)
+    D_struct high + D_func low   → acceptable: structurally different but functionally similar
     D_struct low  + D_func high  → landscape problem: structure consistent but optimisation unstable
     D_struct high + D_func high  → unreliable: random walk
 
@@ -32,7 +39,7 @@ from qulacs.gate import CNOT, RX, RY, RZ
 import scipy.optimize
 
 
-# ── Unitary extraction ─────────────────────────────────────────────────────────
+# ── Circuit / state extraction ────────────────────────────────────────────────
 
 def state_tensor_to_circuit(state: torch.Tensor, n_qubits: int,
                              fixed_angle: float | None = None) -> QuantumCircuit:
@@ -72,33 +79,30 @@ def state_tensor_to_circuit(state: torch.Tensor, n_qubits: int,
     return circuit
 
 
-def circuit_to_unitary(circuit: QuantumCircuit, n_qubits: int) -> np.ndarray:
+def circuit_to_statevector(circuit: QuantumCircuit, n_qubits: int) -> np.ndarray:
     """
-    Extract the 2^n × 2^n unitary matrix of a qulacs QuantumCircuit.
+    Apply a qulacs QuantumCircuit to |0...0> and return the final statevector.
 
-    For n ≤ 8 this is fast; for n = 10 (L6) it is still feasible when K is small.
+    This is the scalable analogue of the old full-unitary extraction path:
+    we compare prepared states directly instead of comparing the entire action
+    of the circuit on all basis inputs.
     """
-    d = 1 << n_qubits        # 2^n_qubits
-    U = np.empty((d, d), dtype=complex)
-    for col in range(d):
-        ket = QuantumState(n_qubits)
-        ket.set_computational_basis(col)
-        circuit.update_quantum_state(ket)
-        U[:, col] = ket.get_vector()
-    return U
+    ket = QuantumState(n_qubits)
+    circuit.update_quantum_state(ket)
+    return ket.get_vector()
 
 
-# ── HS distance ───────────────────────────────────────────────────────────────
+# ── State distance ────────────────────────────────────────────────────────────
 
-def hs_distance(U1: np.ndarray, U2: np.ndarray) -> float:
+def state_fidelity_distance(psi1: np.ndarray, psi2: np.ndarray) -> float:
     """
-    Hilbert-Schmidt distance between two unitaries:
-        d_HS(U1, U2) = 1 - |Tr(U1† U2)|² / d²
-    Returns a value in [0, 1].
+    Fidelity-based distance between two pure states:
+        d(psi1, psi2) = 1 - |<psi1|psi2>|^2
+    Returns a value in [0, 1], up to numerical clipping.
     """
-    d = U1.shape[0]
-    overlap = np.trace(U1.conj().T @ U2)
-    return float(1.0 - (abs(overlap) ** 2) / (d * d))
+    overlap = np.vdot(psi1, psi2)
+    dist = 1.0 - abs(overlap) ** 2
+    return float(np.clip(dist.real, 0.0, 1.0))
 
 
 # ── D_func re-optimisation (optional) ─────────────────────────────────────────
@@ -127,7 +131,7 @@ def _reoptimize_angles(state: torch.Tensor, n_qubits: int,
             rot_positions.append((layer, int(axis), int(qubit)))
 
     if not rot_positions:
-        return state_out  # no rotations → unitary is already fixed
+        return state_out  # no rotations → prepared state is already fixed
 
     x0 = np.array([float(state_np[l, n_qubits + 3 + ax, q])
                    for l, ax, q in rot_positions])
@@ -171,15 +175,15 @@ def compute_pcd(
         weights           : Pauli weights (used only if reoptimize=True).
         energy_shift      : nuclear repulsion shift.
         reoptimize        : if True, run a final global COBYLA optimisation on
-                            each circuit before computing D_func unitaries.
+                            each circuit before computing D_func states.
                             More accurate but K× more expensive.
         reoptimize_maxiter: COBYLA maxiter for the optional re-optimisation.
 
     Returns:
         dict with keys:
-            D_struct  float  pairwise-mean HS distance with θ = π/4
-            D_func    float  pairwise-mean HS distance with optimised θ*
-            n_pairs   int    number of unitary pairs compared (K choose 2)
+            D_struct  float  pairwise-mean state distance with θ = π/4
+            D_func    float  pairwise-mean state distance with optimised θ*
+            n_pairs   int    number of rollout pairs compared (K choose 2)
     """
     K = len(rollout_results)
     if K < 2:
@@ -187,18 +191,18 @@ def compute_pcd(
 
     n_qubits = rollout_results[0]["n_qubits"]
 
-    # ── Build unitaries ───────────────────────────────────────────────────────
-    U_struct = []   # fixed θ = π/4
-    U_func   = []   # COBYLA-optimised θ*
+    # ── Build states ──────────────────────────────────────────────────────────
+    psi_struct = []   # fixed θ = π/4
+    psi_func   = []   # final/optimised θ*
 
     for r in rollout_results:
         state = r["final_state"]        # L × (N+6) × N tensor
 
         # D_struct: bake in π/4 for all rotation angles
         circ_s = state_tensor_to_circuit(state, n_qubits, fixed_angle=math.pi / 4)
-        U_struct.append(circuit_to_unitary(circ_s, n_qubits))
+        psi_struct.append(circuit_to_statevector(circ_s, n_qubits))
 
-        # D_func: use existing angles (or re-optimise if requested)
+        # D_func: use existing angles (or re-optimise if requested once)
         if reoptimize:
             state_opt = _reoptimize_angles(
                 state, n_qubits, hamiltonian, weights, energy_shift, reoptimize_maxiter
@@ -206,13 +210,17 @@ def compute_pcd(
         else:
             state_opt = state
         circ_f = state_tensor_to_circuit(state_opt, n_qubits)
-        U_func.append(circuit_to_unitary(circ_f, n_qubits))
+        psi_func.append(circuit_to_statevector(circ_f, n_qubits))
 
-    # ── Pairwise HS distances ─────────────────────────────────────────────────
+    # ── Pairwise state distances ──────────────────────────────────────────────
     pairs = list(combinations(range(K), 2))
 
-    d_struct_vals = [hs_distance(U_struct[i], U_struct[j]) for i, j in pairs]
-    d_func_vals   = [hs_distance(U_func[i],   U_func[j])   for i, j in pairs]
+    d_struct_vals = [
+        state_fidelity_distance(psi_struct[i], psi_struct[j]) for i, j in pairs
+    ]
+    d_func_vals   = [
+        state_fidelity_distance(psi_func[i], psi_func[j]) for i, j in pairs
+    ]
 
     return {
         "D_struct": float(np.mean(d_struct_vals)),
