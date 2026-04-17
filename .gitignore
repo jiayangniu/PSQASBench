@@ -12,13 +12,8 @@ mol_gen/molecular_fingerprints_full.csv
 *.npy
 *.h5
 
-# Analysis output artifacts (generated, reproducible from results/)
-*.tsv
-meta.txt
-results.md
-critical_structure_analysis_old/
-critical_structure_analysis/
-l1_beh2_motif_analysis/
+# Oversized analysis files (>100MB GitHub limit)
+**/episode_records.tsv
 
 # Wandb runtime artifacts
 wandb/
