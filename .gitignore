@@ -12,6 +12,10 @@ mol_gen/molecular_fingerprints_full.csv
 *.npy
 *.h5
 
+# Analysis output artifacts (generated, reproducible from results/)
+*.tsv
+meta.txt
+
 # Wandb runtime artifacts
 wandb/
 
