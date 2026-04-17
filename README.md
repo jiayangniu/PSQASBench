@@ -1,252 +1,607 @@
 # PSQASBench
 
-Pauli String Quantum Architecture Search Benchmark — NeurIPS 2026 submission.
+**Pauli String Quantum Architecture Search Benchmark** — NeurIPS 2026 submission.
+
+A unified benchmarking framework for Reinforcement Learning–based Quantum Architecture Search (QAS).
+PSQASBench exposes systematic flaws in existing RL-for-QAS methods through a standardised 6-tier molecular test suite, unified evaluation metrics, and reproducible experimental protocols.
 
 ---
 
-## 功能概览
+## Motivation
 
-PSQASBench 目前集成了两类 QAS 方法，并统一到同一套 benchmark 入口：
+Current QAS papers use different molecules, different circuit-quality metrics, and inconsistent checkpoint selection strategies — making cross-method comparison meaningless.  PSQASBench fixes this by providing:
 
-- `CRLQAS`：基于 DQN 的离散结构搜索
-- `HyRLQAS`：基于 Hybrid REINFORCE / RENEW 的离散结构 + 连续参数联合搜索
-
-框架提供了以下通用能力：
-
-- 统一的 `main.py` 运行入口，按 `method / mol / seed` 组织实验
-- 周期性评估指标，包括 `SR@chem`、`CNOT@chem`、`best/mean error`、`D_struct`、`D_func`
-- 单环境与多环境并行训练
-- 可切换的外部角度优化器
-- Qulacs CPU / GPU 状态向量支持
-- 结果与最优线路状态自动保存到 `results/`
+- **One molecular test suite** covering 6 diagnostic tiers (L1–L6)
+- **One evaluation protocol** with shared SR, CNOT@chem, D\_struct, D\_func metrics
+- **One runner interface** so every method runs through the same `main.py` entry point
+- **One post-hoc structure analysis tool** (`critical_structure_tool`) for diagnosing what circuit motifs RL methods actually learn
 
 ---
 
-## 环境配置
+## Molecular Test Suite (6-Tier Diagnostic)
 
-### 基础环境
+All Hamiltonians are Jordan-Wigner encoded and stored in `mol_data/` as `.npz` files containing `hamiltonian`, `weights`, `eigvals`, and `energy_shift`.  Chemical accuracy threshold: **1.6 mHa**.
+
+| Tier | Difficulty Source | Molecules | Qubits | Diagnostic Target |
+|------|------------------|-----------|--------|-------------------|
+| L1 | Basic optimisation | H₂ (equil.), BH, BeH₂ (STO-3G) | 4, 6, 6 | **Minimalism** — can the policy prune redundant gates? |
+| L2 | Asymmetry / interaction hubs | BeH⁺, LiH (equil.), BF | 4, 6, 8 | **Asymmetry** — non-uniform qubit importance |
+| L3 | Near-degenerate (small gap) | HeH⁺, CH₂, LiH (stretch), H₃ (triangle) | 4, 6–8, 6, 6 | **Stability** — flat landscape with ΔE ≈ 0 |
+| L4 | Strong correlation | H₂ (stretch), H₃ (linear), H₂O | 4, 6, 8 | **Representation** — high-order Pauli terms dominate |
+| L5 | Topology routing | H₃ (linear), H₄ (chain) | 6, 8 | **Topology** — 1D nearest-neighbour connectivity constraint |
+| L6 | Scalability | BeH₂ (basis-set ladder: STO-3G → 6-311G) | 6–14 | **Scalability** — exponential action-space growth |
+
+> **L5 note:** action space is restricted to nearest-neighbour entangling gates; all circuits must respect 1D linear connectivity.  Config files for L5 must set `connectivity = linear` under `[env]`.
+
+---
+
+## Benchmark Metrics
+
+### Primary: 2D Pareto View
+
+| Axis | Metric | Definition |
+|------|--------|------------|
+| Quality | Energy Error (mHa) | \|E\_found − E\_exact\| |
+| Cost | CNOT Count | Number of CNOT gates in the found circuit |
+
+A method that reaches chemical accuracy with fewer CNOTs dominates one that uses more gates for the same quality.
+
+### Secondary Metrics
+
+| Metric | Definition |
+|--------|------------|
+| SR@chem | Fraction of K stochastic rollouts reaching chemical accuracy |
+| CNOT@chem | Median CNOT count among successful rollouts |
+| best\_error\_mha | Minimum energy error across all rollouts (mHa) |
+| nfev@chem | VQE function evaluations until first chemical accuracy hit |
+
+### Policy Circuit Diversity (PCD) — *new in this work*
+
+Computed from K stochastic rollouts with fixed policy, comparing prepared states via infidelity:
+
+```text
+d(ψᵢ, ψⱼ) = 1 − |⟨ψᵢ|ψⱼ⟩|²
+```
+
+| Metric | How computed | Interpretation |
+|--------|-------------|----------------|
+| D\_struct | All rotation angles fixed to π/4, compare ψᵢ(π/4) | Circuit-structure diversity |
+| D\_func | Optimised angles θ\*, compare ψᵢ(θ\*) | Functional-state diversity |
+
+#### Diagnostic matrix
+
+| D\_struct | D\_func | Diagnosis |
+|-----------|---------|-----------|
+| Low | Low | ✅ Ideal: consistent structure, stable optimisation |
+| High | Low | ⚠ Acceptable: different structures, same ground state (symmetry) |
+| Low | High | ❌ Landscape problem: structure consistent but optimisation unstable |
+| High | High | ❌ Unreliable: random walk |
+
+---
+
+## Implemented Methods
+
+### RL Methods
+
+| Method | RL Algorithm | Action Space | Status |
+|--------|-------------|--------------|--------|
+| CRLQAS | DQN (off-policy) | Discrete | ✅ Ready |
+| HyRLQAS / Hybrid\_REINFORCE | Batch REINFORCE (on-policy) | Hybrid discrete+continuous | ✅ Ready |
+| RENEW | REINFORCE + Refine Head | Hybrid discrete+continuous | ✅ Ready |
+| PPO-QAS | PPO | Discrete | 🔲 Planned |
+| A2C-hybrid | A2C | Hybrid | 🔲 Planned |
+| CRLQAS-STOP | DQN + STOP action | Discrete + STOP | 🔲 Planned |
+
+### Non-RL Baselines
+
+| Method | Type | Status |
+|--------|------|--------|
+| QuantumDARTS | Differentiable NAS (ICML 2023) | ✅ Ready |
+| TFQAS | Training-free zero-cost proxy | ✅ Ready |
+| ADAPT-VQE | Greedy / classical | 🔲 Partial |
+| Random Search | Random | 🔲 Planned |
+
+#### QuantumDARTS: nfev accounting
+
+QuantumDARTS has two phases with fundamentally different evaluation semantics:
+
+- **Phase 1 (Architecture Search):** Optimises soft Gumbel-softmax circuits via continuous relaxation.  These are *not* hardware-executable discrete circuits.  Phase 1 nfev is reported separately as `phase1_nfev` and is *not* directly comparable to RL method nfev.
+- **Phase 2 (Discrete Evaluation):** Fixes architecture weights with argmax and evaluates real discrete circuits.  This is the only phase whose nfev is comparable to RL baselines and is reported as `phase2_nfev`.
+
+Papers must report Phase 1 and Phase 2 nfev separately to avoid misleading comparisons.
+
+---
+
+## Installation
+
+### Base environment
 
 ```bash
-conda env create -f environment.yml   # 或手动安装依赖
+conda env create -f environment.yml
 conda activate crlqas_env
 ```
 
----
+### GPU qulacs (optional, recommended for n ≥ 10)
 
-## qulacs GPU 支持（QuantumStateGpu）
+The PyPI build of `qulacs` is CPU-only.  To enable `QuantumStateGpu` on NVIDIA GPUs, build from source:
 
-PyPI 版 `qulacs 0.6.13` 是 CPU-only build，不含 `QuantumStateGpu`。
-若机器有 NVIDIA GPU + CUDA，需从源码编译才能启用 GPU state vector 加速。
-
-> **已测试环境**：NVIDIA L4，CUDA 12.8，Python 3.10，conda `crlqas_env`
-
-### 一次性编译步骤
-
-**1. 安装编译依赖**
+> **Tested:** NVIDIA L4, CUDA 12.8, Python 3.10
 
 ```bash
+# 1. Install build dependencies
 conda install -n crlqas_env -c conda-forge cuda-toolkit=12.8 boost boost-cpp -y
 conda run -n crlqas_env pip install pybind11
-```
 
-**2. 克隆 qulacs 源码**
-
-```bash
+# 2. Clone sources
 git clone --depth=1 https://github.com/qulacs/qulacs.git /tmp/qulacs
-```
+git clone --depth=1 --branch v2.13.5 https://github.com/pybind/pybind11.git /tmp/pybind11_src
 
-**3. 预下载 pybind11（FetchContent 在受限网络下无法自动拉取）**
-
-```bash
-git clone --depth=1 --branch v2.13.5 \
-    https://github.com/pybind/pybind11.git /tmp/pybind11_src
-```
-
-**4. 打两处补丁（qulacs 源码 bug）**
-
-```bash
-# 补丁A：gpusim 改用动态 curand/cublas（conda 环境没有 _static.a）
+# 3. Apply two patches (upstream bugs)
 sed -i 's/target_link_libraries(gpusim_static CUDA::cudart_static CUDA::curand_static CUDA::cublas_static)/target_link_libraries(gpusim_static CUDA::cudart_static CUDA::curand CUDA::cublas)/' \
     /tmp/qulacs/src/gpusim/CMakeLists.txt
-
-# 补丁B：add_subdirectory out-of-tree 缺 binary dir 参数
 sed -i 's|add_subdirectory(${pybind11_fetch_SOURCE_DIR})|add_subdirectory(${pybind11_fetch_SOURCE_DIR} ${CMAKE_BINARY_DIR}/_deps/pybind11_fetch-build)|' \
     /tmp/qulacs/CMakeLists.txt
-```
 
-**5. cmake configure**
-
-```bash
+# 4. Configure and build
 mkdir -p /tmp/qulacs_build/_deps
 cp -r /tmp/pybind11_src /tmp/qulacs_build/_deps/pybind11_fetch-src
-
 conda run -n crlqas_env bash -c "
 cd /tmp/qulacs_build
 export CUDACXX=\$(which nvcc)
 BOOST_DIR=\$(python -c 'import sysconfig; print(sysconfig.get_path(\"data\"))')
 cmake /tmp/qulacs \
-  -DPYTHON_EXECUTABLE=\$(which python) \
-  -DPYTHON_SETUP_FLAG=Yes \
-  -DUSE_GPU=Yes \
-  -DCMAKE_C_COMPILER=gcc \
-  -DCMAKE_CXX_COMPILER=g++ \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBOOST_ROOT=\$BOOST_DIR \
-  -DFETCHCONTENT_FULLY_DISCONNECTED=ON
-"
-```
-
-**6. 编译 + 安装**
-
-```bash
-conda run -n crlqas_env bash -c "
-cd /tmp/qulacs_build
+  -DPYTHON_EXECUTABLE=\$(which python) -DPYTHON_SETUP_FLAG=Yes -DUSE_GPU=Yes \
+  -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DCMAKE_BUILD_TYPE=Release \
+  -DBOOST_ROOT=\$BOOST_DIR -DFETCHCONTENT_FULLY_DISCONNECTED=ON
 make -j\$(nproc) qulacs_core
-
 SITE_PKG=\$(python -c 'import sysconfig; print(sysconfig.get_path(\"purelib\"))')
 cp /tmp/qulacs_build/python/qulacs_core.cpython-310-x86_64-linux-gnu.so \$SITE_PKG/
 cp -r /tmp/qulacs/pysrc/qulacs \$SITE_PKG/
 "
+
+# 5. Verify
+python -c "from qulacs import QuantumStateGpu; print('GPU qulacs OK')"
 ```
 
-**7. 验证**
+`RLQAS/environment.py` automatically selects `QuantumStateGpu` when available; no code changes needed.  CPU-only installations fall back to `QuantumState` silently.
 
-```bash
-conda run -n crlqas_env python -c "
-from qulacs import QuantumStateGpu
-s = QuantumStateGpu(4)
-print('GPU qulacs OK')
-"
-```
-
-安装成功后，`RLQAS/environment.py` 顶部的 try/except 会自动选择 `QuantumStateGpu`，无需修改代码。
-
-### 补充说明
-
-- 若 Python 版本不是 3.10，第6步的 `.so` 文件名中 `cpython-310` 需对应修改
-- 编译约需 5–10 分钟（取决于 CPU 核心数）
-- CPU-only 环境直接跳过本节，代码自动 fallback 到 `QuantumState`（CPU）
+> If your Python version is not 3.10, rename the `.so` file accordingly (e.g. `cpython-311-...`).
 
 ---
 
-## 运行方式
+## Quick Start
 
 ```bash
 cd PSQASBench
 conda activate crlqas_env
 
-# CRLQAS，L1 H2
-python main.py --method crlqas --mol L1_H2_Equil_4q --seed 11111
+# CRLQAS on L1 H2, CPU
+python main.py --method crlqas --mol L1_H2_Equil_4q --seed 11111 --device cpu
 
-# 使用 GPU（DQN 网络 + GPU state vector）
-python main.py --method crlqas --mol L1_H2_Equil_4q --seed 11111 --device cuda:0
+# CRLQAS on L6 BeH2 14q, GPU, parallel envs
+python main.py --method crlqas --mol L6_BeH2_CCPVDZ_14q --seed 11111 --device cuda:0
+
+# HyRLQAS (RENEW) on L2 LiH
+python main.py --method hyrlqas --mol L2_LiH_Equil_6q --seed 11111 --device cuda:0
+
+# Override config explicitly
+python main.py --method crlqas --mol L6_BeH2_CCPVDZ_14q \
+               --config bench_14q_rotosolve_gpu_k10.cfg --seed 11111 --device cuda:0
+
+# Configs can live in subdirectories under configs/<method>/
+python main.py --method crlqas --mol L1_BeH2_STO3G_6q \
+               --config Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10.cfg \
+               --seed 11111 --device cuda:0 --use-wandb 0
+
+# QuantumDARTS on L1 BeH2
+python main.py --method qdarts --mol L1_BeH2_STO3G_6q --seed 11111 --device cuda:0
+```
+
+All output is written to:
+
+```text
+results/<method>/<mol>/<config_path_without_suffix>/seed<seed>/
+```
+
+Example:
+
+```text
+results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10/seed11111/
 ```
 
 ---
 
-## 配置说明
+## Common Run Tweaks
 
-每个方法的实验配置位于 `configs/`：
+### CLI flags
 
-- `configs/crlqas/*.cfg`
-- `configs/hyrlqas/*.cfg`
+```bash
+python main.py \
+  --method crlqas \
+  --mol L1_BeH2_STO3G_6q \
+  --config Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10.cfg \
+  --seed 11111 \
+  --device cuda:0 \
+  --use-wandb 0 \
+  --save-summary-detailed 0
+```
 
-其中常用字段包括：
+Commonly changed flags:
 
-- `[general]`：训练轮数、评估频率、并行环境数、保存频率
-- `[env]`：量子线路深度、奖励函数、阈值、curriculum 设置
-- `[agent]`：策略网络结构、batch size、学习率、探索参数
-- `[non_local_opt]`：每步外部角度优化器及其超参数
+- `--method`: choose benchmark runner (`crlqas`, `hyrlqas`, `qdarts`, `tfqas`)
+- `--mol`: molecule key from `bench_utils.MOL_FILES`
+- `--config`: config file relative to `configs/<method>/`
+- `--seed`: random seed; creates a separate `seed<seed>` result directory
+- `--device`: `cpu`, `cuda:0`, `cuda:1`, ...
+- `--use-wandb 0`: disable Weights & Biases upload
+- `--save-summary-detailed 1`: additionally save legacy `summary_<seed>.npy`
 
-`num_parallel_envs > 1` 时会启用并行训练。对于 noiseless 场景，框架会按“相同线路结构”分组，复用 batched VQE kernel 进行并行能量评估。
+### Config fields most often edited
+
+```ini
+[general]
+episodes = 10000
+eval_every = 1000
+eval_K = 50
+num_parallel_envs = 8
+use_wandb = 0
+save_every = 500
+
+[env]
+num_layers = 20
+accept_err = 0.0016
+connectivity = linear    # required for L5 experiments only
+
+[non_local_opt]
+optim_alg = COBYLA
+global_iters = 100
+```
+
+What they control:
+
+- `general.episodes`: total training episodes
+- `general.eval_every`: how often periodic eval runs
+- `general.eval_K`: number of rollouts used per eval
+- `general.num_parallel_envs`: parallel environments for training
+- `env.num_layers`: maximum circuit depth (= maximum episode steps)
+- `env.accept_err`: success threshold in Hartree
+- `env.connectivity`: `all` (default) or `linear`; must be `linear` for L5 experiments
+- `non_local_opt.optim_alg`: local angle optimizer (`COBYLA`, `Rotosolve`, `SPSA`, `AdamSPSA`, `PSRAdam`)
+- `non_local_opt.global_iters`: optimizer budget for `COBYLA`, `SPSA`, `AdamSPSA`, `PSRAdam`
+- `non_local_opt.rotosolve_sweeps`: sweep count for `Rotosolve`
 
 ---
 
-## 外部优化器
+## Configuration Reference
 
-框架当前支持以下 `optim_alg`：
-
-- `COBYLA`
-- `Rotosolve`
-- `SPSA`
-- `AdamSPSA`
-
-统一通过配置项控制：
+Config files live under `configs/crlqas/`, `configs/hyrlqas/`, `configs/qdarts/`, `configs/tfqas/`.
 
 ```ini
+[general]
+episodes = 10000          # total training episodes
+eval_every = 1000         # periodic eval interval
+eval_K = 20               # rollouts per eval
+num_parallel_envs = 10    # 1 = single-env, >1 = parallel training
+use_wandb = 1             # 0 = disable wandb upload
+log_every = 10
+save_every = 200
+
+[env]
+num_qubits = 14
+num_layers = 20           # max circuit depth
+accept_err = 0.0016       # chemical accuracy threshold (Ha)
+connectivity = all        # all | linear
+
+[problem]
+mol_file = <filename>.npz
+
+[agent]
+agent_type = DeepQNstep
+agent_class = DQN_Nstep
+batch_size = 1000
+
 [non_local_opt]
 method = scipy_each_step
-optim_alg = SPSA
-global_iters = 1000
+optim_alg = COBYLA        # COBYLA | Rotosolve | SPSA | AdamSPSA | PSRAdam
+global_iters = 100
 ```
-
-### `COBYLA`
-
-- 已完整接入框架，可直接用于 benchmark
-- 适合做强基线
-- 支持多环境并行训练
-- 不支持当前这套“优化器侧 batched 加速”，因为 SciPy 黑盒搜索过程不能像 `Rotosolve/SPSA` 一样整齐打包为固定批次
-
-### `Rotosolve`
-
-- 已支持单环境与并行环境
-- 在并行训练下支持 grouped batched optimizer 加速
-- 适合无噪声、旋转参数较多但单参数解析更新仍有效的场景
-
-并行加速开关示例：
-
-```ini
-[non_local_opt]
-method = scipy_each_step
-optim_alg = Rotosolve
-rotosolve_sweeps = 1
-global_batched_rotosolve = 1
-```
-
-### `SPSA` / `AdamSPSA`
-
-- 已支持单环境与并行环境
-- 已支持 grouped batched optimizer 加速
-- 更适合希望保留并行优化器加速、同时避免 `Rotosolve` 解析更新限制的场景
-
-推荐配置示例：
-
-```ini
-[non_local_opt]
-method = scipy_each_step
-optim_alg = AdamSPSA
-global_iters = 1000
-global_batched_spsa = 1
-
-a = 0.05
-alpha = 0.602
-c = 0.1
-gamma = 0.101
-lamda = 100
-beta_1 = 0.9
-beta_2 = 0.999
-```
-
-说明：
-
-- `SPSA` 使用标准 SPSA 更新
-- `AdamSPSA` 在 SPSA 梯度估计基础上加入 Adam 风格动量与二阶矩归一化
-- `global_batched_spsa = 1` 时，并行 runner 会对相同线路结构的环境做分组，并用 batched VQE 一次评估 `theta + ck * delta` 与 `theta - ck * delta`
 
 ---
 
-## 并行加速机制
+## Angle Optimisers
 
-框架中的“并行”分成两层：
+Each environment step runs a local angle optimiser over all current rotation gates.
 
-1. 训练并行：通过 `num_parallel_envs` 同时推进多个环境
-2. 优化器并行：对支持固定批次探测的优化器进行 grouped batched 加速
+| Optimiser | Update rule | Budget field | GPU acceleration |
+|-----------|-------------|--------------|-----------------|
+| `COBYLA` | SciPy derivative-free | `global_iters` | partial |
+| `Rotosolve` | Analytic coordinate sweep using `{0, π/2, π}` probes | `rotosolve_sweeps` | strongest |
+| `SPSA` | Stochastic gradient from `±delta` probes | `global_iters` | yes |
+| `AdamSPSA` | SPSA gradient + Adam-style update | `global_iters` | yes |
+| `PSRAdam` | Exact parameter-shift gradient + Adam | `global_iters` | yes |
 
-当前支持情况如下：
+When `num_parallel_envs > 1`, the runner uses one CUDA stream per environment and overlaps optimiser kernels before a single `synchronize()` barrier.  This grouped path is cleanest for `Rotosolve`, `SPSA`/`AdamSPSA`, and `PSRAdam`.
 
-- `COBYLA`：支持训练并行，不支持优化器 batched 加速
-- `Rotosolve`：支持训练并行，支持优化器 batched 加速
-- `SPSA`：支持训练并行，支持优化器 batched 加速
-- `AdamSPSA`：支持训练并行，支持优化器 batched 加速
+### Optimizer Field Reference
 
-因此，如果目标是“更换优化器但保留目前并行加速思路”，建议优先尝试 `SPSA` 或 `AdamSPSA`。
+| Field | Used by | Meaning |
+|-------|---------|---------|
+| `method` | all | usually `scipy_each_step` |
+| `optim_alg` | all | selects the local optimizer |
+| `global_iters` | COBYLA, SPSA, AdamSPSA, PSRAdam | iteration budget |
+| `rotosolve_sweeps` | Rotosolve | number of full coordinate sweeps |
+| `global_batched_rotosolve` | Rotosolve, parallel | enable grouped batched path |
+| `global_batched_spsa` | SPSA/AdamSPSA, parallel | enable grouped batched path |
+| `global_batched_psr` | PSRAdam, parallel | enable grouped batched path |
+| `a`, `alpha`, `c`, `gamma`, `lamda` | SPSA, AdamSPSA | SPSA schedule hyperparameters |
+| `beta_1`, `beta_2` | AdamSPSA, PSRAdam | Adam momentum hyperparameters |
+| `lr` | PSRAdam | Adam learning rate |
+
+---
+
+## Result Artifacts
+
+Each run writes the following files under `results/<method>/<mol>/<config>/seed<seed>/`:
+
+| File | Contents |
+|------|----------|
+| `run_meta.txt` | Method, mol, seed, device, exact energy, wall-clock time, final result |
+| `episode_summary.tsv` | Per-episode energy, depth, CNOT count, reward, ε |
+| `episode_traces.txt` | Per-step action / energy / reward sequences, `first_hit_snapshot` |
+| `policy_loss.tsv` | Policy gradient / DQN loss per update |
+| `best_train.txt` | Circuit achieving the lowest training energy |
+| `best_eval.txt` | Best eval checkpoint (SR, CNOT@chem, D\_struct, D\_func) + full eval trend |
+| `global_best_state_<seed>.npz` | Saved state tensor and op\_history of the best found circuit |
+| `best_thresh*_model.pth` | Policy network checkpoint at global-best energy |
+| `config_used.cfg` | Exact config file used (for reproducibility) |
+
+### `episode_traces.txt` format
+
+Each episode block has the following fields:
+
+```
+[episode N]
+actions = [...]
+energies_ha = [...]
+energy_errors_ha = [...]
+rewards = [...]
+first_hit_snapshot = {"step": S, "gate_params": [...], "param_step_indices": [...]}
+```
+
+`first_hit_snapshot` is written for every episode.  For episodes that never crossed the threshold it is `{}`.  For successful episodes it stores the optimised rotation angles at the exact step where `energy_error <= done_threshold`, enabling warm-start reconstruction in post-hoc analysis.
+
+---
+
+## Critical Structure Tool
+
+### What it is
+
+`critical_structure_tool` is a post-hoc analysis tool for answering:
+
+> For a given performance regime, which gate sub-structure is actually responsible for the low energy?
+
+It addresses the **puzzle-piece phenomenon** observed in RLQAS training traces: energy stays near the initial value for many steps, then drops sharply when one specific gate is inserted.  The tool identifies and compares these critical substructures across multiple episodes and seeds.
+
+### Scope and prerequisites
+
+The tool currently works only with **RLQAS methods** (CRLQAS, HyRLQAS, RENEW) that produce standard PSQASBench result directories.  Required files per run directory:
+
+| File | Required | Used for |
+|------|---------|---------|
+| `episode_traces.txt` | **yes** | action sequences, error traces, warm-start snapshots |
+| `config_used.cfg` | **yes** | action-id → gate decoding, optimizer inheritance |
+| `run_meta.txt` | optional | fallback `accept_err` when `--target-error-mha` is not specified |
+
+QuantumDARTS and TFQAS do not produce `episode_traces.txt` in the RLQAS format and are therefore not currently supported by this tool.
+
+### Warm-start reconstruction
+
+When `episode_traces.txt` contains a non-empty `first_hit_snapshot` (produced by runs after the snapshot-logging change), the tool uses the saved optimised angles as the starting point for circuit reconstruction.  This substantially improves reconstruction fidelity for near-degenerate systems (L3) where cold-start re-optimisation from angle=0 typically falls into a different basin.
+
+For **old result files** without `first_hit_snapshot`, the tool falls back silently to cold-start reconstruction (all angles initialised to 0).
+
+### Usage
+
+Recommended wrapper script:
+
+```bash
+cd PSQASBench
+conda activate crlqas_env
+
+# Interactive: prints bucket summary and prompts for selection
+python analyze_critical_structure.py results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10
+
+# Direct bucket selection
+python analyze_critical_structure.py \
+  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  --bucket 0.55 \
+  --select-n 6 \
+  --beam-width 4 \
+  --branching-factor 3 \
+  --prune-budget 1000 \
+  --out-dir critical_structure_analysis/l1_beh2_cobyla_d10_bucket055
+
+# Harder 8-qubit case — larger slack, smaller budget
+python analyze_critical_structure.py \
+  results/crlqas/L3_CH2_Singlet_8q/LevelCheck_EXP/L3_CH2_Singlet_8q_rotosolve_s2_check \
+  --bucket 0.00 \
+  --select-n 4 \
+  --beam-width 4 \
+  --branching-factor 3 \
+  --prune-budget 300 \
+  --reconstruction-slack-mha 0.5 \
+  --out-dir critical_structure_analysis/l3_ch2_8q_bucket000
+
+# Multiple run directories (multi-seed analysis)
+python analyze_critical_structure.py \
+  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10_seed2 \
+  --bucket 0.55 --select-n 10 --out-dir critical_structure_analysis/l1_beh2_multiseed
+```
+
+Equivalent module entrypoint: `python -m critical_structure_tool <args...>`
+
+### Key parameters
+
+**Episode / bucket selection**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--target-error-mha` | inherit from `run_meta.txt` | threshold defining the first-hit event |
+| `--bucket` | interactive prompt | first-hit error bucket to analyse (mHa, 2 decimal places) |
+| `--select-n` | 6 | number of representative episodes to prune |
+| `--late-fraction` | 1/3 | sample episodes from the last fraction of training |
+| `--anchor-top-k` | 3 | most frequent hit-time last actions treated as protected anchors |
+
+**Error tolerances**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--bucket-slack-mha` | 0.05 | allowed error above bucket center during pruning |
+| `--reconstruction-slack-mha` | 0.3 | extra slack when reconstructed baseline differs from trace; increase for L3+ |
+| `--delta-tolerance-mha` | 0.2 | maximum single-step error increase for a gate to be deletable |
+
+**Pruning budget**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--prune-budget` | 1000 | total child circuit evaluations across the whole pruning phase (main budget) |
+| `--beam-width` | 4 | beam states kept after each expansion |
+| `--branching-factor` | 3 | top-k deletion candidates expanded per beam state |
+| `--max-prune-steps` | auto | depth cap per episode; auto-computed as `gate_count - fixed_gate_count` |
+
+**Optimizer**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--analysis-optimizer` | `inherit` | optimizer used during reconstruction and pruning; `inherit` reads from `config_used.cfg` |
+| `--cobyla-maxiter` | 300 | COBYLA iteration cap for analysis |
+| `--rotosolve-sweeps` | 2 | Rotosolve sweep count for analysis |
+| `--n-restarts` | 2 | COBYLA restarts per optimization call |
+
+### Output files
+
+All outputs are written under `--out-dir` (default: `critical_structure_analysis`):
+
+| File | Contents |
+|------|----------|
+| `first_hit_error_distribution.tsv` | Fine-grained distribution of first-hit errors across all discovered episodes |
+| `bucket_summary.tsv` | Coarser bucket view (rounded to 2 decimal places) with counts and mean hit step |
+| `anchor_actions.tsv` | Most frequent hit-time last actions for the chosen bucket |
+| `selected_episodes.tsv` | Episodes selected for pruning (episode key, seed, first-hit step, last action) |
+| `summary.tsv` | Per-episode pruning results: baseline error, retained error, gate counts, redundancy |
+| `summary.md` | Human-readable markdown table of pruning results |
+| `exact_signature_counts.tsv` | Exact retained gate-sequence matches across episodes |
+| `meta.txt` | Full run metadata (parameters, anchor actions, common retained gates) |
+
+### Interpreting results
+
+**Redundancy ratio** — fraction of gates removed while preserving the error regime.  High redundancy (>70%) is the expected finding for RLQAS due to Circuit Structure Bias.
+
+**Exact retained-structure matches** — episodes retaining identical gate sequences.  Count > 1 suggests a stable learned motif.
+
+**Common retained gate signatures** — gates present in all pruned episodes (exact set intersection).  `none` does not mean no pattern exists; it often indicates consistent qubit-level patterns that the exact-match test misses (use the individual `summary.md` to inspect manually).
+
+**Reconstruction baseline >> target error** — indicates warm-start failure (cold-start landed in wrong basin).  Increase `--reconstruction-slack-mha`, check that `first_hit_snapshot` is present in traces, or treat that episode as unusable.  This is expected for L3 near-degenerate molecules with old result files.
+
+---
+
+## Pipeline Overview
+
+```text
+Training run (CRLQAS / HyRLQAS / RENEW)
+    │
+    ├── results/<method>/<mol>/<config>/seed<seed>/
+    │   ├── episode_traces.txt     ← main input for analysis
+    │   ├── config_used.cfg        ← gate decoding + optimizer info
+    │   └── run_meta.txt           ← accept_err fallback
+    │
+    └── critical_structure_tool
+        │
+        ├── 1. Discover runs (episode_traces.txt files)
+        ├── 2. Build first-hit distribution
+        ├── 3. Choose bucket interactively or via --bucket
+        ├── 4. Sample representative late-training episodes
+        ├── 5. Reconstruct first-hit circuit
+        │       warm-start: use first_hit_snapshot angles (new traces)
+        │       cold-start: re-optimize from angle=0 (old traces)
+        ├── 6. One-shot gate importance (delete each gate, measure |ΔE|)
+        ├── 7. Beam search pruning (fixed deletion prior, prune-budget)
+        └── 8. Compare retained structures across episodes
+```
+
+---
+
+## Repository Structure
+
+```text
+PSQASBench/
+├── main.py                        # unified entry point for all methods
+├── bench_utils.py                 # molecule registry, arg parsing, path constants
+│
+├── RLQAS/                         # RL-based QAS runners (CRLQAS, HyRLQAS, RENEW)
+│   ├── base_runner.py             # abstract BaseRunner + shared periodic_eval + _capture_first_hit_snapshot
+│   ├── crlqas_runner.py           # CRLQAS (DQN) runner
+│   ├── hyrlqas_runner.py          # HyRLQAS / RENEW runner
+│   ├── result_logger.py           # structured artifact writer (all methods share this)
+│   ├── environment.py             # CircuitEnv (CRLQAS)
+│   ├── hy_environment.py          # HyCircuitEnv (HyRLQAS, extends CircuitEnv)
+│   └── agents/                    # DQN, HybridActionPolicy, HybridActionPolicywithRefine
+│
+├── QuantumDARTS/                  # Differentiable NAS baseline (ICML 2023)
+│   ├── darts_runner.py            # QuantumDARTS runner (BaseRunner subclass)
+│   ├── circuit.py                 # soft circuit with Gumbel-softmax mixing
+│   └── gates.py                   # gate library
+│
+├── TFQAS/                         # Training-free QAS baseline
+│   ├── tfqas_runner.py            # TFQAS runner (BaseRunner subclass)
+│   ├── circuit.py                 # circuit template with DAG path counting
+│   ├── expressibility.py          # expressibility proxy metric
+│   ├── search_space.py            # search space definition
+│   └── vqe_eval.py                # VQE evaluation helper
+│
+├── metrics/
+│   ├── eval_utils.py              # greedy_rollout_k, stochastic_rollout_k, aggregate_metrics
+│   └── pcd.py                     # D_struct / D_func via state-vector infidelity
+│
+├── critical_structure_tool/       # post-hoc critical circuit structure analysis
+│   ├── cli.py                     # main entry point and argument parser
+│   ├── circuit_utils.py           # gate construction, qulacs evaluation, optimizers
+│   ├── pruning.py                 # gate importance + probabilistic beam pruning
+│   ├── io_utils.py                # trace parsing, config reading, episode record construction
+│   └── types.py                   # RunContext, EpisodeRecord, GateSpec, BranchState
+│
+├── analyze_critical_structure.py  # thin wrapper: python analyze_critical_structure.py <dirs...>
+│
+├── configs/
+│   ├── crlqas/                    # .cfg files for CRLQAS experiments
+│   ├── hyrlqas/                   # .cfg files for HyRLQAS experiments
+│   ├── qdarts/                    # .cfg files for QuantumDARTS experiments
+│   └── tfqas/                     # .cfg files for TFQAS experiments
+│
+├── mol_data/                      # pre-computed .npz Hamiltonians (Jordan-Wigner, 29 files)
+├── mol_gen/                       # scripts to (re-)generate Hamiltonians and fingerprints
+└── results/                       # training run outputs (gitignored data files)
+```
+
+---
+
+## Known Systematic Issues (benchmark findings)
+
+These are documented as findings; fixes are noted where planned:
+
+1. **Circuit Structure Bias** — RL methods reach chemical accuracy but use far more gates than necessary.  Root cause: fixed max depth forces agents to use all steps; energy-only reward provides no incentive for circuit simplicity.  Diagnosed via `critical_structure_tool`; concept-proof fix is CRLQAS-STOP (planned).
+
+2. **Checkpoint Selection Ambiguity** — All existing methods save checkpoints at global-best energy, biasing saved policies toward deep circuits.  No method implements Pareto-optimal checkpoint selection.  Documented as benchmark finding; not fixed.
+
+3. **Training Instability** — Seed variance is large and largely unreported in prior work.  Quantified via SR@chem across ≥ 5 seeds per molecule × method.
+
+4. **Curriculum Threshold Sensitivity** — The initial `accept_err` and tightening schedule affect convergence significantly but are rarely ablated.  Isolated via the LevelCheck experiment group in `configs/crlqas/LevelCheck_EXP/`.
+
+5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `first_hit_snapshot` field added to `episode_traces.txt` (requires re-running experiments to populate).
+
+---
+
+## Citation
+
+> Paper under review — NeurIPS 2026.  Citation will be added upon acceptance.

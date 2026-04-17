@@ -1,223 +1,436 @@
-# PSQASBench — Paper Structure & Design Decisions
+# PSQASBench Paper Structure
 
-> 本文件记录论文结构讨论与关键设计决策。
-> 🔴 标注表示**悬而未决**的问题，不可在实验/写作中预设结论。
-
----
-
-## Motivation
-
-**RL for QAS 的 evaluation 是 broken 的。**
-
-现有方法在三个维度上存在系统性 inconsistency，导致方法间比较不可信：
-
-| 维度 | 问题描述 |
-|------|---------|
-| **What to test on** | 各方法使用不同分子，无公共基准，结果无法横向比较 |
-| **When to evaluate** | Checkpoint 策略混乱（last / best_energy / 不说明），结果不可复现 |
-| **What to measure** | Energy error 单指标无法区分电路质量（2个CNOT达精度 vs 10个CNOT达精度） |
-
-**本工作的回答**：提出 PSQASBench，系统性解决这三个问题。
+> Internal writing blueprint for the NeurIPS 2026 paper.
+> This file reflects the current working benchmark decisions, not an archival record of old alternatives.
 
 ---
 
-## 贡献列表
+## 1. Paper in One Sentence
 
-1. **6-Tier Molecular Diagnostic Suite**：专为诊断 RL-QAS 失败模式设计的标准化分子集
-2. **Principled Evaluation Protocol**：统一的实验设置与 checkpoint 策略（🔴 见下）
-3. **新评估指标**：Pareto 视角 + Policy Circuit Diversity（PCD: D_struct / D_func）
-4. **Benchmark Findings**：系统性暴露现有方法的缺陷
-5. **CRLQAS-STOP**：概念验证，证明 Circuit Structure Bias 可修复
+**PSQASBench is a principled benchmark for RL-based quantum architecture search that replaces ad hoc molecule choice, ambiguous evaluation timing, and single-metric reporting with a diagnostic 6-level molecular suite, a unified periodic-evaluation protocol, and multi-objective policy diagnostics.**
 
 ---
 
-## 论文结构
+## 2. Core Claims
 
-### Section 1: Introduction
-- RL for QAS 的研究背景与重要性
-- Evaluation inconsistency 的三个维度（上表）
-- 本工作贡献概述
+The paper should make four tightly connected claims:
 
-### Section 2: Related Work
-- RL for QAS 方法综述，重点展示各方法评估设置的差异（为 motivation 提供文献证据）
-- 相邻领域 benchmark 工作对比
+1. **Evaluation in RL-QAS is currently inconsistent.**
+   Different papers test on different molecules, use different checkpoint conventions, and report different success criteria, so method comparisons are not reliable.
 
-### Section 3: PSQASBench — A Principled Evaluation Framework
+2. **A benchmark for RL-QAS must be diagnostic, not just large.**
+   The point is not to collect many chemistry instances, but to cover qualitatively different failure modes of circuit search policies.
 
-#### 3.1 标准化诊断数据集（解决"测什么"）
+3. **PSQASBench provides that benchmark.**
+   It defines a fixed 6-level molecular suite, a unified training/evaluation protocol, and benchmark outputs that preserve both final quality and training dynamics.
 
-6-Tier Molecular Diagnostic Suite：
-
-| Tier | 硬度来源 | 分子 | 诊断目标 |
-|------|---------|------|---------|
-| L1 | 基础优化 | H2(Equil.), BH | Minimalism：能否剪除冗余门 |
-| L2 | 非对称/Interaction Hub | BeH⁺, LiH(Equil.), BF | Asymmetry：资源分配到 interaction hub |
-| L3 | 近简并（小 Gap） | HeH⁺, CH₂, LiH(Stretch), H3(Triangle) | Stability：平坦 landscape 中的策略稳定性 |
-| L4 | 强关联 | H2(Stretch), H3(Linear), H2O | Representation：高阶 Pauli 项的表达能力 |
-| L5 | 拓扑路由 | H3(Linear), H4(Chain) | Topology：1D 连通性约束下的电路设计 |
-| L6 | 规模化 | BeH2 | Scalability：action space 指数增长时的收敛效率 |
-
-**Hamiltonian Fingerprint 指标**（用于描述分子结构特征，独立于方法结果）：
-
-| 指标 | 定义 | 与失败模式的预期关联 |
-|------|------|-------------------|
-| Z-only 占比 | Z-only Pauli 项权重比 | 占比高 → 好电路 CNOT 数应少；方法若用很多 CNOT 则 Circuit Structure Bias 严重 |
-| High-order ratio | ≥4-body Pauli 项权重占比 | 占比高 → 需要深纠缠结构；方法 SR@chem 预期更低 |
-| Energy Gap ΔE | E1 - E0 | 接近 0 → landscape 平坦 → D_func 预期偏高 |
-| Hub Score | max(Iq) / mean(Iq) | 🔴 与方法表现的具体关联需实验后再讨论，不预设 |
-| Asymmetry | (max-min) / mean of Iq | 🔴 与方法表现的具体关联需实验后再讨论，不预设 |
-
-> ⚠️ **注意**：Fingerprint 与方法表现的相关性分析是**数据驱动**的。
-> 只有 Z-only 占比、High-order ratio、ΔE 有较强的理论依据。
-> Hub Score 和 Asymmetry 与具体指标的对应关系**必须等实验数据出来后再讨论**，不可提前断言。
-
-**关于 physical sector 的定位**：
-
-- **主 benchmark 任务定义保持 full-space**。原因是当前 RLQAS/CRLQAS 等方法实际优化的就是 full Hamiltonian，对方法行为与失败模式的解释应优先对应它们真正面对的目标。
-- **补充加入 physical-sector fingerprint analysis**，作为 benchmark validity / chemistry sanity-check，而不是替代主 benchmark 设定。
-- 具体来说：
-  - `full-space fingerprints`：解释当前方法实际上在解什么问题、为什么会难；
-  - `physical-sector fingerprints`：检查这些难点中哪些反映分子的真实化学结构，哪些可能来自未限制 charge / spin sector 的 formulation artifact。
-- 因此，physical sector 的作用不是“改写 benchmark 主任务”，而是**提高 benchmark 对分子难度解释的物理可信度**。
-
-> 建议写法：正文中以 full-space 结果为主；physical-sector 分析作为一节补充诊断，专门讨论 tier 设计的化学有效性与可能的 sector-induced artifact。
-
-#### 3.2 评估协议（解决"何时评估"）
-
-**文献现状**（benchmark finding 的一部分）：
-
-| 做法 | 代表工作 | 缺陷 |
-|------|---------|------|
-| 保存 last checkpoint | 多数论文 | 训练末期可能退化 |
-| 保存 best energy checkpoint | CRLQAS、HyRLQAS | 偏向深电路 |
-| 保存 best SR checkpoint | 极少数 | 忽略电路质量 |
-| 不说明 | 大量论文 | 不可复现 |
-| Checkpoint 完全禁用 | bench-rlqas (PPO/A2C) | 无法评估 policy |
-
-**🔴 本 benchmark 的统一 checkpoint 方案：悬而未决**
-
-候选方案：
-- **方案A**：last checkpoint（最可复现，但不确定训练后期是否退化）
-- **方案B**：训练全程周期性评估（每 N episode greedy rollout × 20次），取 SR@chem 最高的 checkpoint
-- **方案C**：仅记录训练过程中的 global_best_energy，不依赖 checkpoint（只报告训练过程指标，不评估 policy）
-
-> 该决策影响 PCD 的计算和 Pareto 分析。需要先跑少量实验，观察各方法训练曲线后再定。
-
-**固定设置（已确定）**：
-- 每个实验：≥5 个随机 seed
-- 化学精度阈值：1.6 mHa
-- Hamiltonian 编码：Jordan-Wigner
-- 噪声模型：Noiseless only
-
-#### 3.3 评估指标（解决"测什么指标"）
-
-**主指标：Pareto 视角**
-- 横轴：CNOT 门数（circuit cost）
-- 纵轴：Energy Error（mHa）
-- 目标：相同 circuit cost 下 energy error 最小
-
-**辅助指标**：
-
-| 指标 | 定义 |
-|------|------|
-| SR@chem | 多 seed 中达到化学精度的比例 |
-| CNOT@chem | 首次达到化学精度时的 CNOT 数 |
-| nfev@chem | 首次达到化学精度时的 VQE 函数评估次数 |
-| Best energy error | 全程最低 energy error（不限深度） |
-
-**新指标：Policy Circuit Diversity（PCD）**
-
-给定固定 policy，K 个随机 seed 下生成 K 条电路：
-
-- **D_struct**（结构多样性）：固定角度 θ=π/4，计算 CNOT 骨架的 pairwise HS 距离
-- **x z**（功能多样性）：各电路独立优化至 θ*，计算优化后 Unitary 的 pairwise HS 距离
-
-诊断矩阵：
-
-| D_struct | D_func | 解读 |
-|----------|--------|------|
-| 低 | 低 | 理想：结构一致，优化收敛稳定 |
-| 高 | 低 | 可接受：多等价电路，功能一致（Hamiltonian 对称性） |
-| 低 | 高 | 结构统一但优化不稳定，landscape 问题 |
-| 高 | 高 | 方法不可靠，随机游走 |
-
-> 🔴 **PCD 的计算依赖 checkpoint 方案的确定**。checkpoint 方案未定前，PCD 的实验设计暂缓。
+4. **The benchmark reveals failure modes that standard reporting hides.**
+   In particular, methods may reach low energy with poor circuit efficiency, may look stable under final-error reporting but unstable under periodic policy evaluation, and may scale poorly even within a single molecule family.
 
 ---
 
-### Section 4: Findings — What the Framework Reveals
+## 3. Final Benchmark Identity
 
-> 这一节是核心。三个 finding 由实验数据驱动，不预设结论。
+### 3.1 Main Task Definition
 
-#### Finding 1: Circuit Structure Bias（已确认）
-- 现象：RL 方法在 L1/L2 上达到化学精度，但电路深度远超必要
-- 根因：固定最大深度 + reward 仅由 energy error 驱动
-- 展示方式：Pareto 图（energy error × CNOT count）
+Current benchmark identity:
 
-#### Finding 2: Fingerprint 与失败模式的相关性（数据驱动）
-- 跑完实验后，将 Fingerprint 值与方法表现配对分析
-- 展示方式：scatter plot（某 Fingerprint 值 vs 某方法指标）
-- 🔴 具体规律待实验数据出来后再写，不预设
-- 可增加一个补充子段：`full-space vs physical-sector fingerprints`
-  - 目的不是替换主 benchmark 结果，而是检验 tier narrative 的化学稳健性
-  - 特别关注：L3 的小 gap / degeneracy 解释、以及 G1-G4 在 sector projection 前后的变化
+- active-space molecular Hamiltonians
+- Jordan-Wigner mapping
+- noiseless setting
+- full Hilbert-space task definition
+- periodic policy evaluation during training
 
-#### Finding 3: Policy 收敛不稳定（待测量）
-- 展示方式：SR@chem vs episode 曲线（选 2-3 个有代表性的 case）
-- 诊断问题：policy 是否真正收敛？何时收敛？是否会退化？
-- 这个 finding 本身可能就是"RL for QAS 从未稳定收敛"
+Important wording choice for the paper:
 
----
+- the main benchmark task is **full-space**
+- physical-sector analysis is **supplementary validity analysis**, not the main task definition
 
-### Section 5: CRLQAS-STOP — Proof of Concept
-- Finding 1（Circuit Structure Bias）是可修复的
-- 加入 STOP 动作，agent 主动决定终止时机
-- 对比实验：L1/L2 上 CRLQAS vs CRLQAS-STOP 的 Pareto 图
+This lets us stay honest about what the current methods actually optimize, while still discussing chemistry realism where needed.
 
----
+### 3.2 Current 6-Level Suite
 
-### Section 6: Discussion & Conclusion
-- PSQASBench 对 RL for QAS 领域的启示
-- Benchmark validity discussion：当前主任务采用 full-space Hamiltonian，但 physical-sector 分析表明，部分 fingerprint 叙事会受到 charge / spin sector 混合影响；后续 benchmark 可进一步探索 sector-aware 版本
-- 🔴 开放问题列表（checkpoint 策略、policy 收敛性、L4+ 的根本挑战）
-- 未来方向
+| Level | Role | Main benchmark case | Notes |
+|------|------|------|------|
+| L1 | Minimalism | `L1_BeH2_STO3G_6q` | replaces over-trivial `H2` and over-hard `BH` |
+| L2 | Asymmetry / interaction hub | `L2_LiH_Equil_6q` | cleanest current neutral asymmetry case |
+| L3 | Degeneracy / stability | `L3_CH2_Singlet_6q` | keep full-space as main task; sector analysis as supplement |
+| L4 | Representation / correlation | `L4_H2_Stretch_4q` | main anchor |
+| L4-supp | Larger correlated supplement | `L4_H2O_StrongCorr_8q` | supplementary, not the sole L4 definition |
+| L5 | Topology / routing pressure | `L5_H4_Chain_8q` | intended for connectivity-sensitive experiments |
+| L6 | Scalability ladder | `L6_BeH2_631G_8q`, `L6_BeH2_6311G_10q`, `L6_BeH2_CCPVDZ_12q` | same-family scaling story |
 
----
+Optional extension:
 
-## 叙事逻辑（两条故事线的衔接）
+- `L6_BeH2_CCPVDZ_14q` as a stretch target, not part of the core required ladder
 
-```
-Section 3.1 分子集设计
-    ↓ Fingerprint 描述了每个分子"应该"难在哪里
-Section 4 实验结果
-    ↓ 实验告诉我们方法"实际上"难在哪里
-Section 4 Finding 2
-    ↓ 对比两者：预期与实际是否吻合？不吻合处最有研究价值
-Section 3.3 PCD
-    ↓ 补充 Fingerprint 无法解释的部分（结构多样性）
-Section 5 CRLQAS-STOP
-    ↓ 框架不只是诊断工具，还能指导改进
-```
+### 3.3 Benchmark Philosophy
+
+Each level should correspond to a **different diagnostic pressure**, not merely a different qubit count.
+
+- L1 asks whether a policy can avoid unnecessary structure.
+- L2 asks whether the policy allocates entangling resources asymmetrically when the Hamiltonian is asymmetric.
+- L3 asks whether the policy remains stable under near-degeneracy / small-gap pressure.
+- L4 asks whether the method handles strong entanglement / correlation burden.
+- L5 asks whether routing and connectivity constraints damage the search policy.
+- L6 asks whether the method scales when the molecular family is held fixed and only size is increased.
+
+This should be the paper's central justification for the dataset design.
 
 ---
 
-## 悬而未决问题汇总（🔴）
+## 4. Unified Evaluation Protocol
 
-1. **Checkpoint 统一方案**：last / 周期性 SR@chem 最高 / 仅报告训练过程指标，三选一
-2. **PCD 计算时机**：依赖 checkpoint 方案，暂缓设计
-3. **Fingerprint → 方法表现的具体相关性**：实验后数据驱动分析
-4. **Hub Score / Asymmetry 的预测能力**：不预设，看数据
-5. **physical-sector 分析放在正文还是附录**：取决于其对 tier narrative 的影响有多大
-6. **L4+ 方法是否根本无法收敛**：待实验量化
-7. **各方法的最大训练 episode 如何统一**：不同方法收敛速度差异大
+### 4.1 What We Standardize
+
+The benchmark standardizes three things:
+
+1. **What to test on**
+   Fixed 6-level diagnostic suite.
+
+2. **When to evaluate**
+   Periodic evaluation during training, rather than ambiguous “last checkpoint only”.
+
+3. **What to measure**
+   Both performance and circuit quality, plus policy-diversity diagnostics.
+
+### 4.2 Training-Time Evaluation
+
+Current intended protocol:
+
+- multiple random seeds per method/molecule
+- periodic evaluation every fixed number of training episodes
+- each evaluation uses `K` greedy rollouts from the current policy
+- report both training-best and eval-best information
+
+What should be emphasized in the paper:
+
+- we do **not** rely on a vague “chosen checkpoint after the fact”
+- we evaluate policies **during training** under a fixed schedule
+- this makes policy quality and training stability observable
+
+### 4.3 Reported Outputs
+
+The benchmark should explicitly say that each run preserves:
+
+- run-level metadata
+- episode-level training summaries
+- episode-level traces
+- policy-loss history
+- best training circuit summary
+- best evaluation snapshot
+
+This is part of the benchmark contribution because it directly improves reproducibility and post hoc analysis.
 
 ---
 
-## 方法覆盖范围
+## 5. Main Metrics
 
-**RL 方法（主角）**：CRLQAS / PPO-QAS / Hybrid_REINFORCE / A2C-hybrid / RENEW / CRLQAS-STOP
+### 5.1 Primary Performance View: Pareto, Not Single Number
 
-**非 RL 参照（锚点）**：
-- ADAPT-VQE（质量上界）
-- Random Search（下界）
-- QuantumDARTS（梯度类方法对照）
+The main reporting lens should be:
+
+- **energy error**
+- **CNOT count**
+- **rotation count / depth** as supporting circuit-cost views
+
+Core idea:
+
+- a benchmark for architecture search should not reward unnecessarily deep circuits just because they eventually reach low energy
+- therefore we report the quality-cost tradeoff, not energy alone
+
+Recommended main plot family:
+
+- Energy error vs CNOT count
+- optionally Energy error vs depth for L1/L2
+
+### 5.2 Scalar Summary Metrics
+
+Recommended benchmark summaries:
+
+- `SR@chem`
+- `CNOT@chem`
+- `best_error_mha`
+- `mean_error_mha`
+- `mean_cnots`
+- wall-clock cost where relevant for scalability sections
+
+### 5.3 Policy Circuit Diversity (PCD)
+
+PCD should remain part of the benchmark, but the definition should now be stated as **state-based**, not unitary-based.
+
+#### Final definition
+
+Given `K` policy rollouts:
+
+- `D_struct`: set all rotation angles to `pi/4`, generate the output state of each circuit, and compute the mean pairwise state-fidelity distance
+- `D_func`: use the final optimized angles, generate the output state of each circuit, and compute the mean pairwise state-fidelity distance
+
+Distance definition:
+
+- `d(psi_i, psi_j) = 1 - |<psi_i | psi_j>|^2`
+
+Why this is the right definition:
+
+- it scales to larger qubit systems
+- it stays faithful to the actual task, which is state preparation for VQE-like objectives
+- it avoids the full-unitary blowup that makes the old definition impractical for larger systems
+
+Interpretation table:
+
+| D_struct | D_func | Interpretation |
+|----------|--------|----------------|
+| low | low | policy structurally stable and functionally stable |
+| high | low | multiple structurally different but functionally similar solutions |
+| low | high | structure stable but optimization unstable |
+| high | high | policy behavior unreliable / random-walk-like |
+
+Important nuance for the paper:
+
+- topology-only similarity can be discussed as an optional auxiliary analysis
+- but it should **not** replace state-based `D_struct` as the main diversity metric
+
+---
+
+## 6. Proposed Paper Structure
+
+### Section 1. Introduction
+
+Goal:
+
+- establish that RL-QAS evaluation is broken in a specific, reproducible way
+
+Main points:
+
+- RL for QAS is increasingly popular, but cross-paper comparisons are unreliable
+- current inconsistency appears along three axes:
+  - molecule choice
+  - evaluation timing
+  - reported metric
+- PSQASBench is proposed as a principled benchmark that addresses all three
+
+Close the introduction with:
+
+- dataset contribution
+- evaluation-protocol contribution
+- metric contribution
+- empirical benchmark findings
+
+### Section 2. Related Work
+
+Subsections:
+
+- RL for QAS methods
+- existing chemistry benchmark choices in QAS papers
+- benchmark design in adjacent quantum / ML areas
+
+The goal is not a giant survey. The goal is to show:
+
+- the field lacks a common benchmark
+- current evaluation practice is fragmented
+
+### Section 3. PSQASBench
+
+This section should define the benchmark itself, not yet the findings.
+
+Suggested subsections:
+
+#### 3.1 Benchmark Design Principles
+
+- diagnostic rather than generic dataset construction
+- separate failure modes across levels
+- same representation family where possible
+- unified evaluation schedule
+
+#### 3.2 The 6-Level Molecular Diagnostic Suite
+
+Include:
+
+- one compact table with `Level / role / main molecule / qubits / diagnostic target`
+- one short paragraph per level explaining why this molecule is the current anchor
+
+Important writing choice:
+
+- do not overload this section with too much chemistry prose
+- detailed per-molecule rationale can be moved to appendix/supplement if needed
+
+#### 3.3 Benchmark Protocol
+
+Include:
+
+- training setting
+- periodic evaluation schedule
+- seeds
+- noiseless assumption
+- mapping choice
+- full-space main task definition
+
+#### 3.4 Metrics
+
+Include:
+
+- Pareto view
+- scalar summaries
+- state-based PCD
+
+This subsection should explicitly explain why state-based PCD replaces the old full-unitary version for scalable benchmarking.
+
+### Section 4. Benchmark Findings
+
+This is the paper's empirical center.
+
+Recommended structure:
+
+#### 4.1 Finding 1: Circuit Structure Bias
+
+Expected narrative:
+
+- some RL methods can reach good energy only by using far more entangling structure than necessary
+- this is visible in L1/L2 and is hidden by energy-only reporting
+
+Main evidence:
+
+- Pareto plots
+- energy vs CNOT / depth plots
+
+#### 4.2 Finding 2: Difficulty Is Multi-Source, Not Monotone in Qubit Count
+
+Expected narrative:
+
+- benchmark levels separate different failure pressures
+- small systems can still be diagnostically hard
+- size alone is not an adequate benchmark design principle
+
+Main evidence:
+
+- per-level comparison across methods
+- selected case studies from L2/L3/L4/L5
+
+#### 4.3 Finding 3: Policy Stability and Diversity Matter
+
+Expected narrative:
+
+- periodic evaluation reveals instability that final-error reporting would hide
+- `D_struct / D_func` help distinguish “many equivalent solutions” from “optimization instability”
+
+Main evidence:
+
+- evaluation curves over training
+- PCD trend examples on representative cases
+
+#### 4.4 Finding 4: Same-Family Scaling Still Breaks Methods
+
+Expected narrative:
+
+- within the BeH2 ladder, scaling pressure becomes visible even without changing molecule family
+- L6 therefore isolates scalability more cleanly than a mixed-molecule large-case evaluation
+
+Main evidence:
+
+- BeH2 `8q / 10q / 12q`
+- `14q` as optional extension if stable enough
+
+### Section 5. Case Study or Proof-of-Concept Improvement
+
+If the current plan remains `CRLQAS-STOP`, this section should be:
+
+- a focused case study showing how a benchmark-diagnosed failure mode can guide method repair
+
+The point is not to introduce a whole new benchmark paper inside this one.
+The point is:
+
+- PSQASBench is not only diagnostic
+- it can guide method design
+
+### Section 6. Discussion and Limitations
+
+Must include:
+
+- benchmark is full-space by design; sector-aware analysis is supplementary
+- benchmark levels are active-space models, not exact full-chemistry surrogates
+- L6 `14q` remains an extension, not yet the core requirement
+- topology-only metrics are not used as the main diversity metric
+- future work: sector-aware benchmark variants, noise-aware extensions, larger scaling ladder
+
+### Section 7. Conclusion
+
+Keep this short and crisp:
+
+- restate benchmark problem
+- restate PSQASBench solution
+- restate what kinds of failures the benchmark reveals
+
+---
+
+## 7. Main Figures to Prioritize
+
+Because time is limited, the paper should prioritize a small number of high-yield figures.
+
+### Must-Have
+
+1. **Overview figure**
+   The three benchmark problems:
+   - what to test on
+   - when to evaluate
+   - what to measure
+
+2. **6-level benchmark table**
+   Level, molecule, qubits, diagnostic role.
+
+3. **Pareto figure**
+   Representative L1/L2 case showing energy-only reporting failure.
+
+4. **Policy-evaluation trend figure**
+   `best_error / SR / D_struct / D_func` over training on representative cases.
+
+5. **Scalability figure**
+   BeH2 ladder `8q / 10q / 12q`, optionally `14q`.
+
+### Nice-to-Have
+
+6. **Physical-sector supplementary figure**
+   Especially for `CH2`, showing why full-space remains the benchmark task but sector analysis matters for interpretation.
+
+7. **Case-study improvement figure**
+   If `CRLQAS-STOP` remains in the paper.
+
+---
+
+## 8. Minimum Experimental Story Needed for Submission
+
+To make the paper coherent, we do **not** need every possible experiment.
+We need the minimum set that validates the benchmark story.
+
+Minimum package:
+
+1. At least one clear L1/L2 example showing circuit-structure bias.
+2. At least one L3/L4 example showing instability or representation burden.
+3. At least one L5 example showing topology sensitivity.
+4. A clean L6 BeH2 ladder result on `8q / 10q / 12q`.
+5. State-based PCD demonstrated on at least representative levels.
+
+If time is tight:
+
+- keep `14q` as optional
+- keep physical-sector analysis concise
+- keep the proof-of-concept method section short
+
+---
+
+## 9. Writing Rules
+
+To keep the paper strong:
+
+- do not claim chemical realism beyond what the active-space models support
+- do not claim every fingerprint has predictive power before data show it
+- do not mix “benchmark design rationale” with “empirical benchmark findings”
+- do not let `14q` instability redefine the core benchmark commitment
+- do not revert to energy-only reporting in the results section
+
+---
+
+## 10. Current Internal Summary
+
+If we need one short drafting summary sentence, use this:
+
+> PSQASBench is a full-space, noiseless, Jordan-Wigner benchmark for RL-based quantum architecture search built around a 6-level diagnostic molecular suite: `L1 = BeH2_STO3G_6q`, `L2 = LiH_Equil_6q`, `L3 = CH2_Singlet_6q`, `L4 = H2_Stretch_4q` with stretched `H2O_8q` as a supplementary larger case, `L5 = H4_Chain_8q`, and `L6 = BeH2 8q / 10q / 12q`, with `14q` retained as an optional extension; evaluation is performed periodically during training and policy diversity is measured with state-based `D_struct / D_func`.
