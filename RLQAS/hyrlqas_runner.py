@@ -38,6 +38,7 @@ class HyRLQASRunner(BaseRunner):
         seed: int,
         device: torch.device | None = None,
         save_summary_detailed: int | None = None,
+        use_wandb: int | None = None,
     ):
         self.config_path = Path(config_path)
         self.device      = device or torch.device("cpu")
@@ -45,10 +46,15 @@ class HyRLQASRunner(BaseRunner):
         self.conf = get_config(str(self.config_path))
         if save_summary_detailed is not None:
             self.conf.setdefault("general", {})["save_summary_detailed"] = int(save_summary_detailed)
+        if use_wandb is not None:
+            self.conf.setdefault("general", {})["use_wandb"] = int(use_wandb)
         self.save_summary_detailed = bool(int(self.conf.get("general", {}).get("save_summary_detailed", 0)))
+        self.use_wandb = bool(int(self.conf.get("general", {}).get("use_wandb", 1)))
         self.runtime_overrides = {}
         if save_summary_detailed is not None:
             self.runtime_overrides["save_summary_detailed"] = int(save_summary_detailed)
+        if use_wandb is not None:
+            self.runtime_overrides["use_wandb"] = int(use_wandb)
         self.conf["problem"]["mol_data_dir"] = str(Path(mol_path).parent)
         self.conf["problem"]["mol_file"]     = Path(mol_path).name
 
@@ -172,8 +178,8 @@ class HyRLQASRunner(BaseRunner):
         rotation_count = int(count_rotation_gates(env.op_history))
         return {
             "episode": episode,
-            "final_energy": float(env.energy),
-            "final_energy_error": float(env.error),
+            "final_energy_ha": float(env.energy),
+            "final_energy_error_ha": float(env.error),
             "episode_return": float(episode_return),
             "depth": depth,
             "cnot_count": int(env.current_number_of_cnots),
@@ -315,6 +321,7 @@ class HyRLQASRunner(BaseRunner):
             "energies": [],
             "energy_errors": [],
             "rewards": [],
+            "first_hit_snapshot": {},
         }
         episode_hit_global_best = False
 
@@ -364,6 +371,11 @@ class HyRLQASRunner(BaseRunner):
             trace["energies"].append(float(env.energy))
             trace["energy_errors"].append(float(env.error))
             trace["rewards"].append(float(reward))
+            if (
+                not trace["first_hit_snapshot"]
+                and float(env.error) <= float(env.done_threshold)
+            ):
+                trace["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
 
             energy_now = float(env.energy)
             if energy_now < global_best["energy"]:
@@ -400,6 +412,7 @@ class HyRLQASRunner(BaseRunner):
             entity="jiayangniu14-rmit-university",
             name=_run_name,
             group=_group,
+            mode=("online" if self.use_wandb else "disabled"),
             config={**self.conf, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
@@ -538,15 +551,16 @@ class HyRLQASRunner(BaseRunner):
             entity="jiayangniu14-rmit-university",
             name=_run_name,
             group=_group,
+            mode=("online" if self.use_wandb else "disabled"),
             config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
         wandb.define_metric("episode")
         wandb.define_metric("*", step_metric="episode")
 
-        # Dedicated eval env — periodic_eval runs K greedy episodes that modify
+        # Dedicated eval env — periodic_eval runs K stochastic episodes that modify
         # the env's moments/step_counter.  Using a training env would corrupt its
-        # circuit state between rounds (greedy_rollout_k only saves curriculum).
+        # circuit state between rounds (stochastic_rollout_k only saves curriculum).
         _eval_env = HyCircuitEnv(self.conf, device=self.device, use_gpu_state=False,
                                  shared_bvqe=envs[0]._batched_vqe)
 
@@ -594,13 +608,18 @@ class HyRLQASRunner(BaseRunner):
             optimizer_mode = "PSRAdam"
 
         if optimizer_mode is not None:
+            if use_global_batched_rotosolve:
+                budget_str = f"sweeps={int(getattr(envs[0], 'rotosolve_sweeps', 1))}"
+            elif str(optimizer_mode).upper() in {"SPSA", "ADAMSPSA"}:
+                budget_str = f"global_iters={int(envs[0].global_iters)}  spsa_batch=auto"
+            else:
+                budget_str = f"global_iters={int(envs[0].global_iters)}"
             print(
                 f"[parallel-opt] mode={optimizer_mode}  envs={K}  "
-                f"global_iters={int(envs[0].global_iters)}",
+                f"{budget_str}",
                 flush=True,
             )
         round_idx = 0
-        last_progress_log = t_train_start
 
         def _start_env(k: int):
             nonlocal episodes_started
@@ -615,6 +634,7 @@ class HyRLQASRunner(BaseRunner):
                 "energies": [],
                 "energy_errors": [],
                 "rewards": [],
+                "first_hit_snapshot": {},
             }
             ep_returns[k] = 0.0
             ep_starts[k] = time.perf_counter()
@@ -749,6 +769,11 @@ class HyRLQASRunner(BaseRunner):
                 std_traces[k]["rewards"].append(float(reward))
                 std_traces[k]["energies"].append(float(env.energy))
                 std_traces[k]["energy_errors"].append(float(env.error))
+                if (
+                    not std_traces[k]["first_hit_snapshot"]
+                    and float(env.error) <= float(env.done_threshold)
+                ):
+                    std_traces[k]["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
 
                 energy_now = float(env.energy)
                 if energy_now < global_best["energy"]:
@@ -858,26 +883,6 @@ class HyRLQASRunner(BaseRunner):
 
                 _start_env(k)
 
-            elapsed = time.perf_counter() - t_train_start
-            if (
-                optimizer_mode is not None
-                and elapsed - (last_progress_log - t_train_start) >= 60.0
-            ):
-                active_depths = [int(envs[k].step_counter) for k in active_idxs]
-                if active_depths:
-                    min_depth = min(active_depths)
-                    max_depth = max(active_depths)
-                else:
-                    min_depth = max_depth = 0
-                print(
-                    f"[parallel-opt] mode={optimizer_mode}  rounds={round_idx}  "
-                    f"episodes_done={episodes_done}/{total_episodes}  "
-                    f"active_env_depth_range={min_depth}-{max_depth}  "
-                    f"elapsed={elapsed:.0f}s",
-                    flush=True,
-                )
-                last_progress_log = time.perf_counter()
-
         wandb.finish()
         return global_best, energy_history, cnot_history
 
@@ -889,7 +894,10 @@ class HyRLQASRunner(BaseRunner):
         run_start = time.perf_counter()
         self._init_artifacts()
 
-        env   = HyCircuitEnv(self.conf, device=self.device)
+        # Keep the Qulacs state on CPU even for the root env so one run does
+        # not silently touch the default GPU in addition to the requested
+        # BatchedVQE device (cuda:X).
+        env   = HyCircuitEnv(self.conf, device=self.device, use_gpu_state=False)
         agent = self._make_agent(env)
         self._agent = agent
 
@@ -929,8 +937,8 @@ class HyRLQASRunner(BaseRunner):
             self.artifacts.finalize_run_meta(
                 wall_clock_sec=time.perf_counter() - run_start,
                 final_result={
-                    "best_energy": global_best["energy"],
-                    "best_energy_error": best_err,
+                    "best_energy_ha": global_best["energy"],
+                    "best_energy_error_ha": best_err,
                     "best_cnot_count": global_best["cnot_count"],
                     "best_rotation_count": global_best.get("rotation_count", 0),
                     "best_depth": global_best.get("depth", 0),

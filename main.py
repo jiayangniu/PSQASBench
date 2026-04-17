@@ -1,5 +1,6 @@
 import sys
 import torch
+from pathlib import Path
 
 from bench_utils import (
     MOL_DIR, CONFIG_DIR, RESULT_DIR, MOL_FILES,
@@ -26,7 +27,12 @@ def main():
 
     # --- run with log file ---------------------------------------------------
     seed = args['seed']
-    config_tag = config_path.stem
+    config_root = CONFIG_DIR / config_subdir
+    try:
+        config_rel = config_path.relative_to(config_root)
+        config_tag = config_rel.with_suffix("")
+    except ValueError:
+        config_tag = Path(config_path.stem)
     result_dir = RESULT_DIR / args['method'] / args['mol'] / config_tag / f"seed{seed}"
     log_path   = result_dir / "run.log"
     log = redirect_output(log_path)
@@ -34,7 +40,8 @@ def main():
           f"config={args['config']}  seed={seed}  device={device}")
     runner = get_runner(args['method'], config_path, mol_path,
                         result_dir, seed, device,
-                        save_summary_detailed=args["save_summary_detailed"])
+                        save_summary_detailed=args["save_summary_detailed"],
+                        use_wandb=args["use_wandb"])
     result = runner.run()
     sys.stdout = sys.__stdout__
     sys.stderr = sys.__stderr__

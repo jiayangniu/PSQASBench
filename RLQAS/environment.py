@@ -123,7 +123,9 @@ class CircuitEnv:
         self.previous_action = [0, 0, 0, 0]
 
         if "non_local_opt" in conf:
-            self.global_iters  = conf["non_local_opt"]["global_iters"]
+            # `global_iters` is required by COBYLA / SPSA / PSRAdam, but not by
+            # Rotosolve. Default to 0 so Rotosolve configs can omit it cleanly.
+            self.global_iters  = int(conf["non_local_opt"].get("global_iters", 0))
             self.optim_method  = conf["non_local_opt"]["method"]
             self.optim_alg     = conf["non_local_opt"]["optim_alg"]
             self.rotosolve_sweeps = int(conf["non_local_opt"].get("rotosolve_sweeps", 1))
@@ -166,6 +168,24 @@ class CircuitEnv:
             self._cpu_optimizer  = False
 
         self.start_energy = self.min_eig + self.done_threshold
+
+    @staticmethod
+    def _auto_spsa_batch_size(n_params: int) -> int:
+        """Heuristic multi-direction batch size for SPSA-style optimisers.
+
+        We bias toward larger multi-direction batches because the benchmark is
+        optimized for GPU-rich setups where reducing wall-clock is more
+        important than minimizing per-step probe count.
+
+        Rule:
+          - for small circuits (<= 8 active parameters), use all directions;
+          - otherwise use roughly half the active parameters;
+          - cap at 32 probe directions to keep memory and launch cost bounded.
+        """
+        n = max(1, int(n_params))
+        if n <= 8:
+            return n
+        return max(1, min(32, int(np.ceil(n / 2.0))))
 
     # ── step ──────────────────────────────────────────────────────────────────
 
@@ -493,9 +513,10 @@ class CircuitEnv:
         """SPSA-style optimiser with optional Adam preconditioning.
 
         Uses BatchedVQE (GPU) for energy evaluation — same backend as
-        rotosolve_optim.  Each iteration batches the +/- perturbation probes
-        into one eval_batch call (2 rows) instead of two sequential Qulacs
-        calls.
+        rotosolve_optim.  Each iteration batches one or more independent
+        +/- perturbation probe pairs into one eval_batch call. The number of
+        directions is chosen automatically from the number of active rotation
+        parameters.
 
         Supported method names:
           - ``SPSA``: vanilla SPSA updates
@@ -530,6 +551,7 @@ class CircuitEnv:
         A      = float(opts.get("lamda", max(10.0, self.global_iters * 0.1)))
         beta_1 = float(opts.get("beta_1", 0.9))
         beta_2 = float(opts.get("beta_2", 0.999))
+        spsa_batch = self._auto_spsa_batch_size(n_params)
 
         use_adam = str(method).upper() == "ADAMSPSA"
         x        = angles.reshape(1, -1)          # (1, n_params)
@@ -544,13 +566,20 @@ class CircuitEnv:
         for epoch in range(iters):
             ak    = vc._spsa_lr(epoch, a=a, A=A, alpha=alpha)
             ck    = vc._spsa_ck(epoch, c=c, gamma=gamma)
-            delta = np.random.choice([-1.0, 1.0], size=x.shape).astype(np.float32)
+            delta = np.random.choice(
+                [-1.0, 1.0], size=(spsa_batch, x.shape[1])
+            ).astype(np.float32)
 
-            probe = np.concatenate([x + ck * delta, x - ck * delta], axis=0)  # (2, n_params)
-            e     = cost_batch(probe)                                           # (2,)
-            nfev += 2
+            probe_plus  = x + ck * delta
+            probe_minus = x - ck * delta
+            probe = np.concatenate([probe_plus, probe_minus], axis=0)          # (2B, n_params)
+            e     = cost_batch(probe)                                           # (2B,)
+            nfev += 2 * spsa_batch
 
-            grad = ((e[0] - e[1]) / (2.0 * ck)) / delta   # (1, n_params)
+            e_plus  = e[:spsa_batch].reshape(-1, 1)
+            e_minus = e[spsa_batch:].reshape(-1, 1)
+            grad_dirs = ((e_plus - e_minus) / (2.0 * ck)) / delta              # (B, n_params)
+            grad = grad_dirs.mean(axis=0, keepdims=True)                        # (1, n_params)
 
             if use_adam:
                 m    = beta_1 * m + (1.0 - beta_1) * grad
@@ -584,11 +613,19 @@ class CircuitEnv:
         state    = self.state.clone()
         thetas   = state[:, self.num_qubits + 3:]
         rot_pos  = (state[:, self.num_qubits: self.num_qubits + 3] == 1).nonzero(as_tuple=True)
-        angles   = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float32)
-        n_params = len(angles)
+        raw      = np.asarray(thetas[rot_pos].cpu().detach(), dtype=np.float32)
+        n_params = len(raw)
 
         if n_params == 0:
-            return thetas, 0, angles
+            return thetas, 0, raw
+
+        # Break theta=0 symmetry: PSR gradient is zero whenever all angles are
+        # exactly 0 (the gradient of sin(θ) at θ=0 is non-zero, but for
+        # circuits with many zero-initialised gates the landscape can be flat
+        # enough that Adam makes no progress). Matches psr_adam_optim_cpu fix.
+        zero_mask = np.abs(raw) < 1e-6
+        raw[zero_mask] = np.random.uniform(-0.3, 0.3, int(zero_mask.sum())).astype(np.float32)
+        angles = raw
 
         bvqe   = self._batched_vqe
         bdev   = bvqe.device

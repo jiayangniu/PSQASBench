@@ -43,8 +43,8 @@ class ResultLogger:
 
     EPISODE_SUMMARY_FIELDS = [
         "episode",
-        "final_energy",
-        "final_energy_error",
+        "final_energy_ha",
+        "final_energy_error_ha",
         "episode_return",
         "depth",
         "cnot_count",
@@ -142,8 +142,8 @@ class ResultLogger:
             f"result_dir = {self.result_dir}",
             f"config_name = {self.config_path.name}",
             f"start_time_utc = {self.run_start_iso}",
-            f"exact_energy = {self.exact_energy}",
-            f"accept_err = {self.accept_err}",
+            f"exact_energy_ha = {self.exact_energy}",
+            f"accept_err_ha = {self.accept_err}",
             f"save_summary_detailed = {int(self.save_summary_detailed)}",
             f"wandb_run_name = {self.wandb_run_name}",
             f"wandb_run_id = {self.wandb_run_id}",
@@ -172,9 +172,10 @@ class ResultLogger:
     def append_episode_trace(self, episode: int, trace: dict):
         payload = {
             "actions": trace.get("actions", []),
-            "energies": trace.get("energies", []),
-            "energy_errors": trace.get("energy_errors", []),
+            "energies_ha": trace.get("energies", []),
+            "energy_errors_ha": trace.get("energy_errors", []),
             "rewards": trace.get("rewards", []),
+            "first_hit_snapshot": trace.get("first_hit_snapshot", {}),
         }
         with self.episode_traces_path.open("a", encoding="utf-8") as f:
             f.write(f"[episode {int(episode)}]\n")
@@ -200,8 +201,8 @@ class ResultLogger:
             "[best_train]",
             f"episode = {_fmt_scalar(self._best_train.get('episode'))}",
             f"step = {_fmt_scalar(self._best_train.get('step'))}",
-            f"energy = {_fmt_scalar(self._best_train.get('energy'))}",
-            f"energy_error = {_fmt_scalar(self._best_train.get('energy_error'))}",
+            f"energy_ha = {_fmt_scalar(self._best_train.get('energy'))}",
+            f"energy_error_ha = {_fmt_scalar(self._best_train.get('energy_error'))}",
             f"depth = {_fmt_scalar(self._best_train.get('depth'))}",
             f"cnot_count = {_fmt_scalar(self._best_train.get('cnot_count'))}",
             f"rotation_count = {_fmt_scalar(self._best_train.get('rotation_count'))}",
@@ -245,8 +246,8 @@ class ResultLogger:
             f"D_func = {_fmt_scalar(self._best_eval.get('D_func'))}",
             "",
             "[best_eval_circuit]",
-            f"energy = {_fmt_scalar(self._best_eval.get('best_rollout_energy'))}",
-            f"energy_error = {_fmt_scalar(self._best_eval.get('best_rollout_energy_error'))}",
+            f"energy_ha = {_fmt_scalar(self._best_eval.get('best_rollout_energy'))}",
+            f"energy_error_ha = {_fmt_scalar(self._best_eval.get('best_rollout_energy_error'))}",
             f"depth = {_fmt_scalar(self._best_eval.get('best_rollout_depth'))}",
             f"cnot_count = {_fmt_scalar(self._best_eval.get('best_rollout_cnot_count'))}",
             f"rotation_count = {_fmt_scalar(self._best_eval.get('best_rollout_rotation_count'))}",

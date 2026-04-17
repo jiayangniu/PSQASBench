@@ -98,38 +98,39 @@ class BaseRunner(ABC):
         """
         Evaluate the current policy periodically during training.
 
-        - Greedy rollouts (ε=0) × K  →  SR@chem, CNOT@chem, best_error_mha
-        - Stochastic rollouts (current ε, K different seeds) × K  →  D_struct, D_func
+        K stochastic rollouts (current training ε, K different seeds) are used
+        for ALL metrics: SR@chem, CNOT@chem, best_error_mha, D_struct, D_func.
 
-        Curriculum state of `env` is fully restored after both rollout sets.
+        Using stochastic rollouts makes SR a real probability (not a binary 0/1
+        from K identical deterministic rollouts), and eliminates the redundant
+        greedy rollout set.
+
+        Curriculum state of `env` is fully restored after all rollouts.
 
         Args:
             ep  : current training episode number.
             env : CircuitEnv training instance.
-            K   : rollouts per mode (default 20).
+            K   : number of stochastic rollouts (default 20).
 
         Returns:
             Merged dict of aggregate_metrics + PCD results.
         """
         import sys, pathlib
         sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-        from metrics import (greedy_rollout_k, stochastic_rollout_k,
-                             aggregate_metrics, compute_pcd)
+        from metrics import (stochastic_rollout_k, aggregate_metrics, compute_pcd)
 
         accept_err = self.config["env"]["accept_err"]
 
-        # SR / CNOT metrics — deterministic greedy policy
-        greedy_rollouts = greedy_rollout_k(self.greedy_episode, env, K)
-        metrics = aggregate_metrics(greedy_rollouts, accept_err)
-        best_rollout = min(greedy_rollouts, key=lambda r: r["energy_error"])
+        # Single stochastic rollout set — serves both SR/CNOT and PCD
+        pcd_base_seed = ep  # different seed set at every eval checkpoint
+        stoch_rollouts = stochastic_rollout_k(
+            self.stochastic_episode, env, K, base_seed=pcd_base_seed
+        )
+        metrics = aggregate_metrics(stoch_rollouts, accept_err)
+        best_rollout = min(stoch_rollouts, key=lambda r: r["energy_error"])
 
         compute_pcd_flag = bool(int(self.config.get("general", {}).get("compute_pcd", 1)))
         if compute_pcd_flag:
-            # PCD — stochastic policy, K different seeds
-            pcd_base_seed = ep  # different seed set at every eval checkpoint
-            stoch_rollouts = stochastic_rollout_k(
-                self.stochastic_episode, env, K, base_seed=pcd_base_seed
-            )
             pcd = compute_pcd(
                 stoch_rollouts,
                 hamiltonian  = self.hamiltonian,
@@ -165,6 +166,40 @@ class BaseRunner(ABC):
         out_path = self.result_dir / f"result_seed{self.seed}.npz"
         np.savez(out_path, **{k: np.array(v) for k, v in result.items()})
         return out_path
+
+    # ── Shared trace helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _capture_first_hit_snapshot(env) -> dict:
+        """Capture the minimum parameter snapshot needed to reconstruct first-hit.
+
+        The snapshot stores only:
+          - the hit step index
+          - optimized rotation parameters at that step
+          - which action-prefix step each parameter belongs to
+
+        All other information (energies, errors, threshold, actions) is already
+        available from the surrounding trace / run metadata.
+        """
+        state = env.state.detach().cpu()
+        gate_params = []
+        param_step_indices = []
+
+        for step_idx, rec in enumerate(env.op_history):
+            if rec.get("type") != "rot":
+                continue
+            layer = int(rec["layer"])
+            q = int(rec["q"])
+            axis = int(rec["axis"])
+            angle_plane = env.num_qubits + 3 + axis - 1
+            gate_params.append(float(state[layer][angle_plane][q].item()))
+            param_step_indices.append(step_idx)
+
+        return {
+            "step": int(env.step_counter),
+            "gate_params": gate_params,
+            "param_step_indices": param_step_indices,
+        }
 
     # ── Shared training dispatch ─────────────────────────────────────────────
 
@@ -360,11 +395,13 @@ class BaseRunner(ABC):
             zm = np.abs(raw) < 1e-6
             raw[zm] = np.random.uniform(-0.3, 0.3, zm.sum())
             opts = getattr(env, "options", {})
+            bdev = env._batched_vqe.device
             meta.append({
                 "k": k, "env": env, "state": st,
+                "state_gpu": st.to(bdev),          # cached once; avoids repeated CPU→GPU copies
                 "rot_pos": rot_pos, "n": n_params,
                 "angles": raw.copy(),
-                "bdev": env._batched_vqe.device,
+                "bdev": bdev,
                 "lr": float(opts.get("lr", 0.01)),
                 "b1": float(opts.get("beta_1", 0.9)),
                 "b2": float(opts.get("beta_2", 0.999)),
@@ -390,7 +427,7 @@ class BaseRunner(ABC):
             ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
             with ctx:
                 a_t = torch.tensor(m["angles"].reshape(1, -1), dtype=torch.float32, device=m["bdev"])
-                init_t[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(m["bdev"]), a_t)
+                init_t[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], a_t)
         if use_streams:
             torch.cuda.synchronize()
         for i, m in enumerate(meta):
@@ -412,7 +449,7 @@ class BaseRunner(ABC):
                 ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
                 with ctx:
                     probe_t = torch.tensor(probe, dtype=torch.float32, device=bdev)
-                    e_tensors[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(bdev), probe_t)
+                    e_tensors[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], probe_t)
 
             if use_streams:
                 torch.cuda.synchronize()
@@ -436,7 +473,7 @@ class BaseRunner(ABC):
             ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
             with ctx:
                 a_t = torch.tensor(m["angles"].reshape(1, -1), dtype=torch.float32, device=m["bdev"])
-                final_t[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(m["bdev"]), a_t)
+                final_t[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], a_t)
         if use_streams:
             torch.cuda.synchronize()
 
@@ -448,9 +485,9 @@ class BaseRunner(ABC):
     def _spsa_envs_batched(self, envs, opt_states=None, method="SPSA"):
         """SPSA / AdamSPSA for K envs with one CUDA stream per env per iteration.
 
-        Per iteration: ±delta probes for all K envs are evaluated in parallel
-        (one kernel per stream), followed by a current-val eval pass to track
-        the best solution.
+        Per iteration: one or more independent ±delta probe pairs are batched
+        per environment, then all environments are overlapped across streams.
+        A separate current-value eval pass tracks the best solution.
         """
         if opt_states is None:
             opt_states = [env.state.clone() for env in envs]
@@ -466,11 +503,13 @@ class BaseRunner(ABC):
                 continue
             angles = np.asarray(st[:, env.num_qubits + 3:][rot_pos].cpu(), dtype=np.float32)
             opts = getattr(env, "options", {})
+            bdev = env._batched_vqe.device
             meta.append({
                 "k": k, "env": env, "state": st,
+                "state_gpu": st.to(bdev),          # cached once; avoids repeated CPU→GPU copies
                 "rot_pos": rot_pos, "n": n_params,
                 "angles": angles.reshape(1, -1).copy(),   # (1, n)
-                "bdev": env._batched_vqe.device,
+                "bdev": bdev,
                 "a": float(opts.get("a", 0.05)),
                 "alpha": float(opts.get("alpha", 0.602)),
                 "c": float(opts.get("c", 0.1)),
@@ -478,6 +517,7 @@ class BaseRunner(ABC):
                 "A": float(opts.get("lamda", max(10.0, env.global_iters * 0.1))),
                 "b1": float(opts.get("beta_1", 0.9)),
                 "b2": float(opts.get("beta_2", 0.999)),
+                "spsa_batch": int(env._auto_spsa_batch_size(n_params)),
                 "iters": max(1, int(env.global_iters)),
                 "m": np.zeros((1, n_params), dtype=np.float32),
                 "v": np.zeros((1, n_params), dtype=np.float32),
@@ -500,7 +540,7 @@ class BaseRunner(ABC):
             ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
             with ctx:
                 a_t = torch.tensor(m["angles"], dtype=torch.float32, device=m["bdev"])
-                init_t[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(m["bdev"]), a_t)
+                init_t[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], a_t)
         if use_streams:
             torch.cuda.synchronize()
         for i, m in enumerate(meta):
@@ -508,32 +548,51 @@ class BaseRunner(ABC):
 
         max_iters = max(m["iters"] for m in meta)
         for epoch in range(max_iters):
-            # Phase 1: ±delta probes in parallel
-            e_pm = [None] * len(meta)
+            # Phase 1+3 merged: probe ±delta rows PLUS current-x row in one eval_batch call.
+            # Probe rows  0..2B-1  → gradient estimate.
+            # Row 2B (last row)    → energy at current x, used for best-solution tracking.
+            # This halves the number of GPU-CPU round-trips vs separate Phase1 / Phase3.
+            e_merged = [None] * len(meta)
             for i, (m, stream) in enumerate(zip(meta, streams)):
                 if epoch >= m["iters"]:
                     continue
                 ck = vc._spsa_ck(epoch, c=m["c"], gamma=m["gamma"])
-                delta = np.random.choice([-1.0, 1.0], size=m["angles"].shape).astype(np.float32)
+                spsa_batch = m["spsa_batch"]
+                delta = np.random.choice(
+                    [-1.0, 1.0], size=(spsa_batch, m["angles"].shape[1])
+                ).astype(np.float32)
                 m["_delta"] = delta
                 m["_ck"] = ck
-                probe = np.concatenate([m["angles"] + ck * delta,
-                                        m["angles"] - ck * delta], axis=0)  # (2, n)
+                probe = np.concatenate([
+                    m["angles"] + ck * delta,   # rows 0..B-1
+                    m["angles"] - ck * delta,   # rows B..2B-1
+                    m["angles"],                # row 2B  ← current x for best tracking
+                ], axis=0)  # (2B+1, n)
                 ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
                 with ctx:
                     probe_t = torch.tensor(probe, dtype=torch.float32, device=m["bdev"])
-                    e_pm[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(m["bdev"]), probe_t)
+                    e_merged[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], probe_t)
             if use_streams:
                 torch.cuda.synchronize()
 
-            # Phase 2: gradient + angle update
+            # Phase 2: gradient + angle update + best tracking (all from one eval result)
             for i, m in enumerate(meta):
-                if epoch >= m["iters"] or e_pm[i] is None:
+                if epoch >= m["iters"] or e_merged[i] is None:
                     continue
-                e_vals = e_pm[i].cpu().numpy()   # (2,)
+                e_all = e_merged[i].cpu().numpy()   # (2B+1,)
+                B = m["spsa_batch"]
+                # Best tracking: energy of x_E (row 2B, evaluated before this update)
+                val = float(e_all[2 * B])
+                if val < m["best_val"]:
+                    m["best_val"] = val
+                    m["best_angles"] = m["angles"].copy()   # save x_E before overwriting
+                # Gradient from probe rows → update to x_{E+1}
                 ak = vc._spsa_lr(epoch, a=m["a"], A=m["A"], alpha=m["alpha"])
                 ck, delta = m["_ck"], m["_delta"]
-                grad = ((e_vals[0] - e_vals[1]) / (2.0 * ck)) / delta   # (1, n)
+                e_plus  = e_all[:B].reshape(-1, 1)
+                e_minus = e_all[B:2*B].reshape(-1, 1)
+                grad_dirs = ((e_plus - e_minus) / (2.0 * ck)) / delta
+                grad = grad_dirs.mean(axis=0, keepdims=True)   # (1, n)
                 if use_adam:
                     m["m"] = m["b1"] * m["m"] + (1 - m["b1"]) * grad
                     m["v"] = m["b2"] * m["v"] + (1 - m["b2"]) * grad ** 2
@@ -543,24 +602,20 @@ class BaseRunner(ABC):
                 else:
                     m["angles"] = m["angles"] - ak * grad
 
-            # Phase 3: current-val evals in parallel (for best tracking)
-            curr_t = [None] * len(meta)
-            for i, (m, stream) in enumerate(zip(meta, streams)):
-                if epoch >= m["iters"]:
-                    continue
-                ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
-                with ctx:
-                    a_t = torch.tensor(m["angles"], dtype=torch.float32, device=m["bdev"])
-                    curr_t[i] = m["env"]._batched_vqe.eval_batch(m["state"].to(m["bdev"]), a_t)
-            if use_streams:
-                torch.cuda.synchronize()
-            for i, m in enumerate(meta):
-                if curr_t[i] is None:
-                    continue
-                val = float(curr_t[i].item())
-                if val < m["best_val"]:
-                    m["best_val"] = val
-                    m["best_angles"] = m["angles"].copy()
+        # Final eval: track energy of the last updated angles (x_K)
+        final_t = [None] * len(meta)
+        for i, (m, stream) in enumerate(zip(meta, streams)):
+            ctx = torch.cuda.stream(stream) if stream else contextlib.nullcontext()
+            with ctx:
+                a_t = torch.tensor(m["angles"], dtype=torch.float32, device=m["bdev"])
+                final_t[i] = m["env"]._batched_vqe.eval_batch(m["state_gpu"], a_t)
+        if use_streams:
+            torch.cuda.synchronize()
+        for i, m in enumerate(meta):
+            val = float(final_t[i].item())
+            if val < m["best_val"]:
+                m["best_val"] = val
+                m["best_angles"] = m["angles"].copy()
 
         for m in meta:
             th = envs[m["k"]].state[:, envs[m["k"]].num_qubits + 3:]

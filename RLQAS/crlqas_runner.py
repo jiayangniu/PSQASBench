@@ -64,6 +64,7 @@ class CRLQASRunner(BaseRunner):
         seed: int,
         device: torch.device | None = None,
         save_summary_detailed: int | None = None,
+        use_wandb: int | None = None,
     ):
         self.config_path = Path(config_path)
         self.device      = device or torch.device("cpu")
@@ -71,10 +72,15 @@ class CRLQASRunner(BaseRunner):
         self.conf = get_config(str(self.config_path))
         if save_summary_detailed is not None:
             self.conf.setdefault("general", {})["save_summary_detailed"] = int(save_summary_detailed)
+        if use_wandb is not None:
+            self.conf.setdefault("general", {})["use_wandb"] = int(use_wandb)
         self.save_summary_detailed = bool(int(self.conf.get("general", {}).get("save_summary_detailed", 0)))
+        self.use_wandb = bool(int(self.conf.get("general", {}).get("use_wandb", 1)))
         self.runtime_overrides = {}
         if save_summary_detailed is not None:
             self.runtime_overrides["save_summary_detailed"] = int(save_summary_detailed)
+        if use_wandb is not None:
+            self.runtime_overrides["use_wandb"] = int(use_wandb)
 
         self.conf["problem"]["mol_data_dir"] = str(Path(mol_path).parent)
         self.conf["problem"]["mol_file"]     = Path(mol_path).name
@@ -190,8 +196,8 @@ class CRLQASRunner(BaseRunner):
         rotation_count = int(count_rotation_gates(env.op_history))
         return {
             "episode": episode,
-            "final_energy": float(env.energy),
-            "final_energy_error": float(env.error),
+            "final_energy_ha": float(env.energy),
+            "final_energy_error_ha": float(env.error),
             "episode_return": float(episode_return),
             "depth": depth,
             "cnot_count": int(env.current_number_of_cnots),
@@ -208,10 +214,8 @@ class CRLQASRunner(BaseRunner):
         """
         Single deterministic (ε=0) rollout with the current DQN policy.
 
-        Called by BaseRunner.periodic_eval() via greedy_rollout_k().
         env.step() is called with train_flag=False to prevent curriculum
-        side-effects; the caller (greedy_rollout_k) handles curriculum
-        save/restore around all K rollouts.
+        side-effects; the caller handles curriculum save/restore around all K rollouts.
         """
         agent = self._agent
         accept_err = self.conf["env"]["accept_err"]
@@ -310,6 +314,7 @@ class CRLQASRunner(BaseRunner):
             "energies": [],
             "energy_errors": [],
             "rewards": [],
+            "first_hit_snapshot": {},
         }
         episode_hit_global_best = False
         for itr in range(env.num_layers + 1):
@@ -334,6 +339,11 @@ class CRLQASRunner(BaseRunner):
             trace["energies"].append(float(env.energy))
             trace["energy_errors"].append(float(env.error))
             trace["rewards"].append(float(reward))
+            if (
+                not trace["first_hit_snapshot"]
+                and float(env.error) <= float(env.done_threshold)
+            ):
+                trace["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
             if agent.saver.enabled:
                 agent.saver.stats_file["train"][ep]["errors"].append(env.error)
                 agent.saver.stats_file["train"][ep]["errors_noiseless"].append(env.error_noiseless)
@@ -376,6 +386,7 @@ class CRLQASRunner(BaseRunner):
             entity="jiayangniu14-rmit-university",
             name=_run_name,
             group=_group,
+            mode=("online" if self.use_wandb else "disabled"),
             config={**self.conf, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
@@ -533,6 +544,7 @@ class CRLQASRunner(BaseRunner):
             "energies": [],
             "energy_errors": [],
             "rewards": [],
+            "first_hit_snapshot": {},
         } for _ in range(K)]
 
         global_best = {"energy": float("inf"), "episode": None, "step": None,
@@ -556,6 +568,7 @@ class CRLQASRunner(BaseRunner):
             entity="jiayangniu14-rmit-university",
             name=_run_name,
             group=_group,
+            mode=("online" if self.use_wandb else "disabled"),
             config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
@@ -603,14 +616,19 @@ class CRLQASRunner(BaseRunner):
             optimizer_mode = "PSRAdam"
 
         if optimizer_mode is not None:
+            if use_global_batched_rotosolve:
+                budget_str = f"sweeps={int(getattr(envs[0], 'rotosolve_sweeps', 1))}"
+            elif str(optimizer_mode).upper() in {"SPSA", "ADAMSPSA"}:
+                budget_str = f"global_iters={int(envs[0].global_iters)}  spsa_batch=auto"
+            else:
+                budget_str = f"global_iters={int(envs[0].global_iters)}"
             print(
                 f"[parallel-opt] mode={optimizer_mode}  envs={K}  "
-                f"global_iters={int(envs[0].global_iters)}",
+                f"{budget_str}",
                 flush=True,
             )
 
         round_idx = 0
-        last_progress_log = t_train_start
 
         while total_ep < total_episodes:
             round_idx += 1
@@ -681,6 +699,11 @@ class CRLQASRunner(BaseRunner):
                 ep_traces[k]["rewards"].append(float(reward))
                 ep_traces[k]["energies"].append(float(envs[k].energy))
                 ep_traces[k]["energy_errors"].append(float(envs[k].error))
+                if (
+                    not ep_traces[k]["first_hit_snapshot"]
+                    and float(envs[k].error) <= float(envs[k].done_threshold)
+                ):
+                    ep_traces[k]["first_hit_snapshot"] = self._capture_first_hit_snapshot(envs[k])
 
                 nstep_bufs[k].push(
                     states[k],
@@ -783,26 +806,12 @@ class CRLQASRunner(BaseRunner):
                         "energies": [],
                         "energy_errors": [],
                         "rewards": [],
+                        "first_hit_snapshot": {},
                     }
                 else:
                     new_states[k] = ns_mod
 
             states = new_states
-
-            elapsed = time.perf_counter() - t_train_start
-            if (
-                optimizer_mode is not None
-                and elapsed - (last_progress_log - t_train_start) >= 60.0
-            ):
-                max_depth = max(int(env.step_counter) for env in envs)
-                min_depth = min(int(env.step_counter) for env in envs)
-                print(
-                    f"[parallel-opt] mode={optimizer_mode}  rounds={round_idx}  "
-                    f"episodes_done={total_ep}/{total_episodes}  "
-                    f"env_depth_range={min_depth}-{max_depth}  elapsed={elapsed:.0f}s",
-                    flush=True,
-                )
-                last_progress_log = time.perf_counter()
 
             # ── 4. DQN replay: one update per round (K new transitions added) ─
             if len(agent.memory) > batch_size:
@@ -821,7 +830,10 @@ class CRLQASRunner(BaseRunner):
         run_start = time.perf_counter()
         self._init_artifacts()
 
-        env   = CircuitEnv(self.conf, device=self.device)
+        # Keep the Qulacs state on CPU even for the root env so one run does
+        # not silently touch the default GPU in addition to the requested
+        # BatchedVQE device (cuda:X).
+        env   = CircuitEnv(self.conf, device=self.device, use_gpu_state=False)
         agent = (bench_agents
                  .__dict__[self.conf["agent"]["agent_type"]]
                  .__dict__[self.conf["agent"]["agent_class"]]
@@ -866,8 +878,8 @@ class CRLQASRunner(BaseRunner):
             self.artifacts.finalize_run_meta(
                 wall_clock_sec=time.perf_counter() - run_start,
                 final_result={
-                    "best_energy": global_best["energy"],
-                    "best_energy_error": best_err,
+                    "best_energy_ha": global_best["energy"],
+                    "best_energy_error_ha": best_err,
                     "best_cnot_count": global_best["cnot_count"],
                     "best_rotation_count": global_best.get("rotation_count", 0),
                     "best_depth": global_best.get("depth", 0),

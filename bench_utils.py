@@ -26,6 +26,13 @@ MOL_FILES = {
     "L2_BF_8q":             "L2_BF_8q_geom_B_.0_.0_0.0;_F_.0_.0_1.267_jordan_wigner.npz",
     "L3_HeH_Plus_4q":       "L3_HeH_Plus_4q_geom_He_.0_.0_0.0;_H_.0_.0_0.774_jordan_wigner.npz",
     "L3_CH2_Singlet_6q":    "L3_CH2_Singlet_6q_geom_C_.0_.0_0.0;_H_.0_0.86_0.73;_H_.0_-0.86_0.73_jordan_wigner.npz",
+    "L3_CH2_Singlet_8q":    "L3_CH2_Singlet_8q_geom_C_.0_.0_0.0;_H_.0_0.86_0.73;_H_.0_-0.86_0.73_jordan_wigner.npz",
+    "L3_CH2_Singlet_R113_A080_6q": "L3_CH2_Singlet_R113_A080_6q_geom_C_.0_.0_0.0;_H_.0_0.726_0.866;_H_.0_-0.726_0.866_jordan_wigner.npz",
+    "L3_CH2_Singlet_R113_A130_6q": "L3_CH2_Singlet_R113_A130_6q_geom_C_.0_.0_0.0;_H_.0_1.024_0.478;_H_.0_-1.024_0.478_jordan_wigner.npz",
+    "L3_CH2_Singlet_R130_A100_6q": "L3_CH2_Singlet_R130_A100_6q_geom_C_.0_.0_0.0;_H_.0_0.996_0.836;_H_.0_-0.996_0.836_jordan_wigner.npz",
+    "L3_CH2_Singlet_R130_A130_6q": "L3_CH2_Singlet_R130_A130_6q_geom_C_.0_.0_0.0;_H_.0_1.178_0.549;_H_.0_-1.178_0.549_jordan_wigner.npz",
+    "L3_CH2_Singlet_R130_A100_8q": "L3_CH2_Singlet_R130_A100_8q_geom_C_.0_.0_0.0;_H_.0_0.996_0.836;_H_.0_-0.996_0.836_jordan_wigner.npz",
+    "L3_CH2_Singlet_R130_A130_8q": "L3_CH2_Singlet_R130_A130_8q_geom_C_.0_.0_0.0;_H_.0_1.178_0.549;_H_.0_-1.178_0.549_jordan_wigner.npz",
     "L3_LiH_Stretch_6q":    "L3_LiH_Stretch_6q_geom_Li_.0_.0_0.0;_H_.0_.0_3.500_jordan_wigner.npz",
     "LiH_6q_2p2":           "LiH_6q_geom_Li_.0_.0_.0;_H_.0_.0_2.2_jordan_wigner.npz",
     "L3_H3_Triangle_6q":    "L3_H3_Triangle_6q_geom_H_.0_.0_0.0;_H_1.0_.0_0.0;_H_0.5_0.866_0.0_jordan_wigner.npz",
@@ -58,10 +65,12 @@ def redirect_output(file_path: Path):
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
-METHODS = ["crlqas", "hyrlqas"]
+METHODS = ["crlqas", "hyrlqas", "qdarts", "tfqas"]
 METHOD_CONFIG_DIR = {
-    "crlqas": "crlqas",
+    "crlqas":  "crlqas",
     "hyrlqas": "hyrlqas",
+    "qdarts":  "qdarts",
+    "tfqas":   "tfqas",
 }
 
 
@@ -93,6 +102,8 @@ def parse_args() -> dict:
                         help="Torch device string (e.g. cuda:0, cpu)")
     parser.add_argument("--save-summary-detailed", required=False, type=int, choices=[0, 1],
                         help="Whether to save the legacy detailed summary_<seed>.npy (0/1)")
+    parser.add_argument("--use-wandb", required=False, type=int, choices=[0, 1],
+                        help="Whether to enable Weights & Biases logging/upload (0/1)")
 
     args = parser.parse_args()
     return dict(
@@ -102,6 +113,7 @@ def parse_args() -> dict:
         device=args.device,
         config=(args.config if args.config else f"{args.mol}.cfg"),
         save_summary_detailed=args.save_summary_detailed,
+        use_wandb=args.use_wandb,
     )
 
 
@@ -109,7 +121,8 @@ def parse_args() -> dict:
 
 def get_runner(method: str, config_path: Path, mol_path: Path,
                result_dir: Path, seed: int, device: torch.device,
-               save_summary_detailed: int | None = None):
+               save_summary_detailed: int | None = None,
+               use_wandb: int | None = None):
     if method == "crlqas":
         from RLQAS import CRLQASRunner
         return CRLQASRunner(
@@ -119,6 +132,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
             seed,
             device,
             save_summary_detailed=save_summary_detailed,
+            use_wandb=use_wandb,
         )
     if method == "hyrlqas":
         from RLQAS import HyRLQASRunner
@@ -129,5 +143,18 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
             seed,
             device,
             save_summary_detailed=save_summary_detailed,
+            use_wandb=use_wandb,
         )
+    if method == "qdarts":
+        from QuantumDARTS import QuantumDARTSRunner
+        return QuantumDARTSRunner(
+            config_path,
+            mol_path,
+            result_dir,
+            seed,
+            device,
+        )
+    if method == "tfqas":
+        from TFQAS import TFQASRunner
+        return TFQASRunner(config_path, mol_path, result_dir, seed, device)
     raise ValueError(f"Unknown method '{method}'. Implemented so far: {METHODS}")
