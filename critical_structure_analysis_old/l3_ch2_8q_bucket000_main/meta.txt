@@ -1,0 +1,39 @@
+analysis_type = critical_structure
+target_error_mha = inherit_from_run_meta
+selected_bucket_mha = 0.00
+discovered_runs = 1
+hit_episodes_in_bucket = 77
+selected_episodes = 10
+late_fraction = 0.3333333333333333
+analysis_optimizer_request = inherit
+rotosolve_sweeps = 2
+anchor_top_k = 3
+beam_width = 3
+branching_factor = 3
+max_prune_steps_override = auto
+prune_budget = 1000
+reconstruction_slack_mha = 0.01
+delta_tolerance_mha = 0.2
+
+[resolved_optimizers]
+rotosolve = 10
+
+[anchor_actions]
+CNOT(0->4) = 13
+CNOT(1->5) = 7
+CNOT(4->0) = 5
+
+[common_retained_gate_signatures]
+none
+
+[exact_retained_structure_matches]
+count=1 retained_gates=RY(q=6) | CNOT(6->4)
+count=1 retained_gates=RX(q=6) | CNOT(6->7)
+count=1 retained_gates=RX(q=6) | CNOT(6->5) | CNOT(5->1) | RX(q=5) | CNOT(6->1) | CNOT(6->4) | RY(q=0) | CNOT(0->4)
+count=1 retained_gates=RX(q=7) | CNOT(7->3) | CNOT(7->3) | RY(q=5) | CNOT(6->0)
+count=1 retained_gates=CNOT(4->0) | CNOT(6->2) | RY(q=6)
+count=1 retained_gates=RX(q=0) | CNOT(0->4) | CNOT(4->3) | CNOT(3->2) | CNOT(4->5) | CNOT(5->0) | CNOT(3->6) | CNOT(3->1) | CNOT(2->0) | RY(q=1) | CNOT(2->5) | CNOT(4->1) | CNOT(3->0) | CNOT(4->1) | CNOT(4->1) | CNOT(3->7) | CNOT(4->1) | CNOT(3->7) | CNOT(3->5) | CNOT(6->1) | CNOT(2->7) | CNOT(5->7) | CNOT(6->0) | CNOT(1->7) | CNOT(2->7) | CNOT(3->6) | CNOT(3->2) | CNOT(3->0) | CNOT(3->0) | CNOT(5->1) | CNOT(3->5) | CNOT(3->0)
+count=1 retained_gates=RY(q=3) | RY(q=4) | CNOT(3->6) | CNOT(4->7) | RX(q=3) | RX(q=4) | CNOT(7->2) | CNOT(7->0) | CNOT(7->2) | CNOT(0->7)
+count=1 retained_gates=RY(q=4) | CNOT(4->2) | CNOT(2->7)
+count=1 retained_gates=RY(q=4) | RY(q=1)
+count=1 retained_gates=RY(q=4) | CNOT(4->0)
