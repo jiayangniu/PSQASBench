@@ -116,6 +116,7 @@ class HyRLQASRunner(BaseRunner):
             device=str(self.device),
             exact_energy=self.exact_energy,
             accept_err=float(self.conf["env"]["accept_err"]),
+            analysis_save_threshold=float(self._analysis_save_threshold(self.conf)),
             save_summary_detailed=self.save_summary_detailed,
             runtime_overrides=self.runtime_overrides,
         )
@@ -316,12 +317,13 @@ class HyRLQASRunner(BaseRunner):
         agent.HybridAction_policy_net.train()
         traj      = []
         ep_return = 0.0
+        analysis_save_threshold_ha = float(self._analysis_save_threshold(self.conf))
         trace = {
             "actions": [],
             "energies": [],
             "energy_errors": [],
             "rewards": [],
-            "first_hit_snapshot": {},
+            "analysis_snapshots": [],
         }
         episode_hit_global_best = False
 
@@ -368,14 +370,20 @@ class HyRLQASRunner(BaseRunner):
             traj.append(step_record)
             state      = self._modify_state(next_state, env)
             ep_return += float(reward)
+            prev_error_ha = (
+                float(trace["energy_errors"][-1])
+                if trace["energy_errors"]
+                else float("inf")
+            )
             trace["energies"].append(float(env.energy))
             trace["energy_errors"].append(float(env.error))
             trace["rewards"].append(float(reward))
-            if (
-                not trace["first_hit_snapshot"]
-                and float(env.error) <= float(env.done_threshold)
-            ):
-                trace["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
+            self._maybe_append_analysis_snapshot(
+                trace,
+                env,
+                analysis_save_threshold_ha=analysis_save_threshold_ha,
+                prev_error_ha=prev_error_ha,
+            )
 
             energy_now = float(env.energy)
             if energy_now < global_best["energy"]:
@@ -620,6 +628,7 @@ class HyRLQASRunner(BaseRunner):
                 flush=True,
             )
         round_idx = 0
+        analysis_save_threshold_ha = float(self._analysis_save_threshold(self.conf))
 
         def _start_env(k: int):
             nonlocal episodes_started
@@ -634,7 +643,7 @@ class HyRLQASRunner(BaseRunner):
                 "energies": [],
                 "energy_errors": [],
                 "rewards": [],
-                "first_hit_snapshot": {},
+                "analysis_snapshots": [],
             }
             ep_returns[k] = 0.0
             ep_starts[k] = time.perf_counter()
@@ -767,13 +776,19 @@ class HyRLQASRunner(BaseRunner):
                 trajs[k].append(m["step_record"])
                 ep_returns[k] += float(reward)
                 std_traces[k]["rewards"].append(float(reward))
+                prev_error_ha = (
+                    float(std_traces[k]["energy_errors"][-1])
+                    if std_traces[k]["energy_errors"]
+                    else float("inf")
+                )
                 std_traces[k]["energies"].append(float(env.energy))
                 std_traces[k]["energy_errors"].append(float(env.error))
-                if (
-                    not std_traces[k]["first_hit_snapshot"]
-                    and float(env.error) <= float(env.done_threshold)
-                ):
-                    std_traces[k]["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
+                self._maybe_append_analysis_snapshot(
+                    std_traces[k],
+                    env,
+                    analysis_save_threshold_ha=analysis_save_threshold_ha,
+                    prev_error_ha=prev_error_ha,
+                )
 
                 energy_now = float(env.energy)
                 if energy_now < global_best["energy"]:

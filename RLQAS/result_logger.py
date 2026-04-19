@@ -77,6 +77,7 @@ class ResultLogger:
         device: str,
         exact_energy: float,
         accept_err: float,
+        analysis_save_threshold: float | None,
         save_summary_detailed: bool,
         runtime_overrides: dict | None = None,
     ):
@@ -88,6 +89,9 @@ class ResultLogger:
         self.device = str(device)
         self.exact_energy = float(exact_energy)
         self.accept_err = float(accept_err)
+        self.analysis_save_threshold = (
+            None if analysis_save_threshold is None else float(analysis_save_threshold)
+        )
         self.save_summary_detailed = bool(save_summary_detailed)
         self.runtime_overrides = runtime_overrides or {}
 
@@ -144,6 +148,7 @@ class ResultLogger:
             f"start_time_utc = {self.run_start_iso}",
             f"exact_energy_ha = {self.exact_energy}",
             f"accept_err_ha = {self.accept_err}",
+            f"analysis_save_threshold_ha = {_fmt_scalar(self.analysis_save_threshold)}",
             f"save_summary_detailed = {int(self.save_summary_detailed)}",
             f"wandb_run_name = {self.wandb_run_name}",
             f"wandb_run_id = {self.wandb_run_id}",
@@ -175,7 +180,7 @@ class ResultLogger:
             "energies_ha": trace.get("energies", []),
             "energy_errors_ha": trace.get("energy_errors", []),
             "rewards": trace.get("rewards", []),
-            "first_hit_snapshot": trace.get("first_hit_snapshot", {}),
+            "analysis_snapshots": trace.get("analysis_snapshots", []),
         }
         with self.episode_traces_path.open("a", encoding="utf-8") as f:
             f.write(f"[episode {int(episode)}]\n")

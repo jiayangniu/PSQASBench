@@ -134,6 +134,7 @@ class CRLQASRunner(BaseRunner):
             device=str(self.device),
             exact_energy=self.exact_energy,
             accept_err=float(self.conf["env"]["accept_err"]),
+            analysis_save_threshold=float(self._analysis_save_threshold(self.conf)),
             save_summary_detailed=self.save_summary_detailed,
             runtime_overrides=self.runtime_overrides,
         )
@@ -309,12 +310,13 @@ class CRLQASRunner(BaseRunner):
         agent.policy_net.train()
 
         ep_reward = 0.0
+        analysis_save_threshold_ha = float(self._analysis_save_threshold(self.conf))
         trace = {
             "actions": [],
             "energies": [],
             "energy_errors": [],
             "rewards": [],
-            "first_hit_snapshot": {},
+            "analysis_snapshots": [],
         }
         episode_hit_global_best = False
         for itr in range(env.num_layers + 1):
@@ -336,14 +338,20 @@ class CRLQASRunner(BaseRunner):
             )
             state = next_state.clone()
             ep_reward += float(reward)
+            prev_error_ha = (
+                float(trace["energy_errors"][-1])
+                if trace["energy_errors"]
+                else float("inf")
+            )
             trace["energies"].append(float(env.energy))
             trace["energy_errors"].append(float(env.error))
             trace["rewards"].append(float(reward))
-            if (
-                not trace["first_hit_snapshot"]
-                and float(env.error) <= float(env.done_threshold)
-            ):
-                trace["first_hit_snapshot"] = self._capture_first_hit_snapshot(env)
+            self._maybe_append_analysis_snapshot(
+                trace,
+                env,
+                analysis_save_threshold_ha=analysis_save_threshold_ha,
+                prev_error_ha=prev_error_ha,
+            )
             if agent.saver.enabled:
                 agent.saver.stats_file["train"][ep]["errors"].append(env.error)
                 agent.saver.stats_file["train"][ep]["errors_noiseless"].append(env.error_noiseless)
@@ -539,12 +547,13 @@ class CRLQASRunner(BaseRunner):
         ep_returns = [0.0] * K
         ep_starts = [time.perf_counter()] * K
         ep_hit_global_best = [False] * K
+        analysis_save_threshold_ha = float(self._analysis_save_threshold(self.conf))
         ep_traces = [{
             "actions": [],
             "energies": [],
             "energy_errors": [],
             "rewards": [],
-            "first_hit_snapshot": {},
+            "analysis_snapshots": [],
         } for _ in range(K)]
 
         global_best = {"energy": float("inf"), "episode": None, "step": None,
@@ -697,13 +706,19 @@ class CRLQASRunner(BaseRunner):
                 ns_mod = self._modify_state(ns, envs[k])
                 ep_returns[k] += float(reward)
                 ep_traces[k]["rewards"].append(float(reward))
+                prev_error_ha = (
+                    float(ep_traces[k]["energy_errors"][-1])
+                    if ep_traces[k]["energy_errors"]
+                    else float("inf")
+                )
                 ep_traces[k]["energies"].append(float(envs[k].energy))
                 ep_traces[k]["energy_errors"].append(float(envs[k].error))
-                if (
-                    not ep_traces[k]["first_hit_snapshot"]
-                    and float(envs[k].error) <= float(envs[k].done_threshold)
-                ):
-                    ep_traces[k]["first_hit_snapshot"] = self._capture_first_hit_snapshot(envs[k])
+                self._maybe_append_analysis_snapshot(
+                    ep_traces[k],
+                    envs[k],
+                    analysis_save_threshold_ha=analysis_save_threshold_ha,
+                    prev_error_ha=prev_error_ha,
+                )
 
                 nstep_bufs[k].push(
                     states[k],
@@ -806,7 +821,7 @@ class CRLQASRunner(BaseRunner):
                         "energies": [],
                         "energy_errors": [],
                         "rewards": [],
-                        "first_hit_snapshot": {},
+                        "analysis_snapshots": [],
                     }
                 else:
                     new_states[k] = ns_mod

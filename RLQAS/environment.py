@@ -84,7 +84,7 @@ class CircuitEnv:
         # use_gpu_state=False forces CPU QuantumState even when QuantumStateGpu
         # is available.  Parallel envs must use CPU to avoid CUDA-stream
         # contention (K threads sharing the default stream would serialize).
-        _QS = vc.QuantumStateGPU if use_gpu_state else vc.QuantumStateCPU
+        _QS = vc.get_quantum_state_class(use_gpu_state)
         self.ket = _QS(self.num_qubits)
 
         # BatchedVQE always runs on GPU (if available) regardless of use_gpu_state.

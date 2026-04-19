@@ -11,14 +11,31 @@ from scipy.optimize import OptimizeResult
 
 from qulacs import ParametricQuantumCircuit, DensityMatrix, QuantumState as QuantumStateCPU
 from qulacs.gate import CNOT, RX, RY, RZ
-try:
-    from qulacs import QuantumStateGpu as QuantumStateGPU
-except ImportError:
-    QuantumStateGPU = QuantumStateCPU
-# Default alias used by single-env (sequential) code paths.
-QuantumState = QuantumStateGPU
 from qulacs.gate import (DepolarizingNoise, TwoQubitDepolarizingNoise,
                           AmplitudeDampingNoise)
+
+
+_QUANTUM_STATE_GPU_CLS = None
+
+
+def get_quantum_state_class(use_gpu_state: bool):
+    """Resolve the Qulacs state class lazily.
+
+    Importing ``QuantumStateGpu`` at module import time can create a CUDA
+    context on the default GPU even when the benchmark later uses CPU states
+    (`use_gpu_state=False`).  We therefore import the GPU state class only when
+    a caller explicitly requests it.
+    """
+    global _QUANTUM_STATE_GPU_CLS
+    if not use_gpu_state:
+        return QuantumStateCPU
+    if _QUANTUM_STATE_GPU_CLS is None:
+        try:
+            from qulacs import QuantumStateGpu as _QuantumStateGPU
+        except ImportError:
+            _QuantumStateGPU = QuantumStateCPU
+        _QUANTUM_STATE_GPU_CLS = _QuantumStateGPU
+    return _QUANTUM_STATE_GPU_CLS
 
 
 # ── Circuit construction ──────────────────────────────────────────────────────
@@ -91,7 +108,7 @@ def get_energy_qulacs(angles, observable, weights, circuit, n_qubits,
 def _get_exp_val(n_qubits, circuit, op, phys_noise=False, err_mitig=0, state=None):
     if not phys_noise:
         if state is None:
-            state = QuantumState(n_qubits)
+            state = QuantumStateCPU(n_qubits)
         else:
             state.set_zero_state()
         circuit.update_quantum_state(state)

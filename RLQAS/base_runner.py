@@ -170,11 +170,17 @@ class BaseRunner(ABC):
     # ── Shared trace helpers ──────────────────────────────────────────────────
 
     @staticmethod
-    def _capture_first_hit_snapshot(env) -> dict:
-        """Capture the minimum parameter snapshot needed to reconstruct first-hit.
+    def _analysis_save_threshold(config) -> float:
+        """Return the fixed threshold used for analysis snapshot saving."""
+        env_conf = config.get("env", {})
+        return float(env_conf.get("analysis_save_threshold", env_conf["accept_err"]))
+
+    @staticmethod
+    def _capture_analysis_snapshot(env) -> dict:
+        """Capture the minimum parameter snapshot needed to reconstruct one event.
 
         The snapshot stores only:
-          - the hit step index
+          - the zero-based step index
           - optimized rotation parameters at that step
           - which action-prefix step each parameter belongs to
 
@@ -200,6 +206,27 @@ class BaseRunner(ABC):
             "gate_params": gate_params,
             "param_step_indices": param_step_indices,
         }
+
+    @classmethod
+    def _maybe_append_analysis_snapshot(
+        cls,
+        trace: dict,
+        env,
+        *,
+        analysis_save_threshold_ha: float,
+        prev_error_ha: float,
+    ) -> None:
+        """Append a snapshot when the error crosses below the analysis threshold."""
+        current_error_ha = float(env.error)
+        if prev_error_ha > analysis_save_threshold_ha and current_error_ha <= analysis_save_threshold_ha:
+            trace.setdefault("analysis_snapshots", []).append(
+                cls._capture_analysis_snapshot(env)
+            )
+
+    @staticmethod
+    def _capture_first_hit_snapshot(env) -> dict:
+        """Backward-compatible alias for older callers."""
+        return BaseRunner._capture_analysis_snapshot(env)
 
     # ── Shared training dispatch ─────────────────────────────────────────────
 
