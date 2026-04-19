@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from .circuit_utils import prefix_to_gates
 from .io_utils import (
     REPO_ROOT,
     choose_bucket_interactive,
-    collect_episode_records,
+    collect_snapshot_records,
     compute_anchor_action_counts,
     discover_run_dirs,
     sample_representative_episodes,
@@ -20,7 +21,7 @@ from .io_utils import (
     summarize_first_hit_distribution,
 )
 from .pruning import compute_gate_importance, probabilistic_beam_prune
-from .types import EpisodeRecord
+from .types import SnapshotRecord
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,19 +40,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mode",
+        choices=["analyze", "list"],
+        default="analyze",
+        help=(
+            "list: only generate and print the event-error distribution and bucket summary; "
+            "analyze: continue into bucket selection, sampling, and pruning. Default: analyze."
+        ),
+    )
+    parser.add_argument(
         "--target-error-mha",
         type=float,
         default=None,
         help=(
-            "Threshold used to define the first-hit circuit. "
-            "If omitted, fallback to accept_err from run_meta.txt when available."
+            "Optional extra error filter on saved snapshot events. "
+            "If omitted, analyze all saved snapshot events for new runs and use legacy accept_err fallback for old runs."
         ),
     )
     parser.add_argument(
         "--bucket",
         type=str,
         default=None,
-        help="Bucket to analyze (mHa, rounded to 2 decimals). If omitted, prompt interactively.",
+        help="Event-error bucket to analyze. Buckets are quantized using --bucket-width. If omitted, prompt interactively.",
+    )
+    parser.add_argument(
+        "--bucket-width",
+        type=float,
+        default=0.01,
+        help="Bucket width in mHa. Default: 0.01 mHa.",
     )
     parser.add_argument(
         "--select-n",
@@ -169,8 +185,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--out-dir",
-        default="critical_structure_analysis",
-        help="Directory to write all analysis outputs. Default: critical_structure_analysis",
+        default=None,
+        help=(
+            "Directory to write all analysis outputs. "
+            "If omitted, the tool auto-generates a subdirectory under critical_structure_analysis/."
+        ),
     )
     return parser.parse_args()
 
@@ -184,6 +203,101 @@ def write_tsv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
             writer.writerow(row)
 
 
+def print_distribution_summary(distribution_rows: list[dict], bucket_rows: list[dict]) -> None:
+    print("\nEvent Error Distribution (mHa):")
+    print("display_value\tcount\tseed_count\tmin_event_error_mha\tmax_event_error_mha")
+    for row in distribution_rows:
+        print(
+            f"{row['display_value']}\t{row['count']}\t{row['seed_count']}\t"
+            f"{row['min_first_hit_error_mha']}\t{row['max_first_hit_error_mha']}"
+        )
+
+    print("\nAvailable buckets (mHa):")
+    print("bucket\tcount\tseed_count\tmean_hit_step\tmean_episode")
+    for row in bucket_rows:
+        print(
+            f"{row['bucket']}\t{row['count']}\t{row['seed_count']}\t"
+            f"{row['mean_hit_step']:.2f}\t{row['mean_episode']:.2f}"
+        )
+
+
+def _slug(text: str) -> str:
+    keep = []
+    for ch in str(text):
+        if ch.isalnum():
+            keep.append(ch.lower())
+        elif ch in {"-", "_", "."}:
+            keep.append(ch)
+        else:
+            keep.append("_")
+    slug = "".join(keep).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "unknown"
+
+
+def _bucket_token(value: float | str) -> str:
+    return _slug(str(value).replace(".", "p"))
+
+
+def _compact_molecule_token(name: str) -> str:
+    parts = [part for part in str(name).split("_") if part]
+    if not parts:
+        return "unknown"
+    level = parts[0]
+    species = parts[1] if len(parts) >= 2 else parts[0]
+    q_token = next((part for part in reversed(parts) if re.fullmatch(r"\d+q", part.lower())), None)
+    compact_parts = [level, species]
+    if q_token is not None and q_token not in compact_parts:
+        compact_parts.append(q_token)
+    return _slug("_".join(compact_parts))
+
+
+def _config_suffix_token(config_name: str, molecule_name: str) -> str:
+    config = str(config_name)
+    prefix = f"{molecule_name}_"
+    if config.startswith(prefix):
+        config = config[len(prefix):]
+    return _slug(config)
+
+
+def auto_out_dir(
+    records: list[SnapshotRecord],
+    *,
+    mode: str,
+    bucket_width_mha: float,
+    chosen_bucket: str | None = None,
+) -> Path:
+    methods = sorted({rec.run.method for rec in records})
+    molecules = sorted({rec.run.molecule for rec in records})
+    configs = sorted({rec.run.config_name for rec in records})
+
+    method_token = _slug(methods[0]) if len(methods) == 1 else "multi_method"
+    if len(molecules) == 1:
+        molecule_token = _compact_molecule_token(molecules[0])
+    else:
+        molecule_token = "multi_molecule"
+    if len(configs) == 1 and len(molecules) == 1:
+        config_token = _config_suffix_token(configs[0], molecules[0])
+    elif len(configs) == 1:
+        config_token = _slug(configs[0])
+    else:
+        config_token = "multi_config"
+
+    parts = [
+        method_token,
+        molecule_token,
+        config_token,
+        _slug(mode),
+        f"w{_bucket_token(bucket_width_mha)}",
+    ]
+    if chosen_bucket is not None:
+        parts.append(f"b{_bucket_token(chosen_bucket)}")
+
+    name = "__".join(parts)
+    return (REPO_ROOT / "critical_structure_analysis" / name).resolve()
+
+
 def load_molecule(path: Path):
     data = np.load(path, allow_pickle=True)
     H = data["hamiltonian"].astype(np.complex128)
@@ -193,10 +307,10 @@ def load_molecule(path: Path):
     return H, energy_shift, exact_energy, n_qubits
 
 
-def episode_key(rec: EpisodeRecord) -> str:
+def episode_key(rec: SnapshotRecord) -> str:
     return (
         f"{rec.run.method}__{rec.run.molecule}__{rec.run.config_name}"
-        f"__{rec.run.seed_name}__ep{rec.episode_index}"
+        f"__{rec.run.seed_name}__ep{rec.episode_index}__snap{rec.snapshot_index}"
     )
 
 
@@ -208,20 +322,20 @@ def format_gate_signature_sequence(gates) -> str:
     return " | ".join(g.signature for g in gates)
 
 
-def resolve_analysis_optimizer(requested: str, rec: EpisodeRecord) -> str:
+def resolve_analysis_optimizer(requested: str, rec: SnapshotRecord) -> str:
     requested_norm = str(requested).lower()
     if requested_norm == "inherit":
         return rec.run.train_optimizer or "cobyla"
     return requested_norm
 
 
-def resolve_cobyla_maxiter(args: argparse.Namespace, rec: EpisodeRecord, optimizer: str) -> int:
+def resolve_cobyla_maxiter(args: argparse.Namespace, rec: SnapshotRecord, optimizer: str) -> int:
     if optimizer == "cobyla" and args.analysis_optimizer == "inherit" and rec.run.train_cobyla_maxiter:
         return int(rec.run.train_cobyla_maxiter)
     return int(args.cobyla_maxiter)
 
 
-def resolve_rotosolve_sweeps(args: argparse.Namespace, rec: EpisodeRecord, optimizer: str) -> int:
+def resolve_rotosolve_sweeps(args: argparse.Namespace, rec: SnapshotRecord, optimizer: str) -> int:
     if optimizer == "rotosolve" and args.analysis_optimizer == "inherit" and rec.run.train_rotosolve_sweeps:
         return int(rec.run.train_rotosolve_sweeps)
     return int(args.rotosolve_sweeps)
@@ -229,19 +343,75 @@ def resolve_rotosolve_sweeps(args: argparse.Namespace, rec: EpisodeRecord, optim
 
 def main() -> int:
     args = parse_args()
-    out_dir = Path(args.out_dir).expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     run_dirs = discover_run_dirs(args.inputs)
     if not run_dirs:
         raise SystemExit("No valid run directories with episode_traces.txt were found.")
 
     print(f"Discovered {len(run_dirs)} run directories.")
-    records = collect_episode_records(run_dirs, target_error_mha=args.target_error_mha)
+    records = collect_snapshot_records(
+        run_dirs,
+        target_error_mha=args.target_error_mha,
+        bucket_width_mha=args.bucket_width,
+    )
     if not records:
-        raise SystemExit("No episodes reached the requested target error threshold.")
+        raise SystemExit("No analysis snapshot events were found for the requested inputs/threshold.")
 
     distribution_rows = summarize_first_hit_distribution(records)
+    bucket_rows = summarize_buckets(records)
+
+    print_distribution_summary(distribution_rows, bucket_rows)
+
+    if args.mode == "list":
+        out_dir = (
+            Path(args.out_dir).expanduser().resolve()
+            if args.out_dir is not None
+            else auto_out_dir(records, mode="list", bucket_width_mha=args.bucket_width)
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_tsv(
+            out_dir / "first_hit_error_distribution.tsv",
+            [
+                "display_value",
+                "count",
+                "seed_count",
+                "min_first_hit_error_mha",
+                "max_first_hit_error_mha",
+            ],
+            distribution_rows,
+        )
+        write_tsv(
+            out_dir / "bucket_summary.tsv",
+            ["bucket", "count", "seed_count", "mean_hit_step", "mean_episode"],
+            bucket_rows,
+        )
+        list_lines = [
+            "# Bucket Listing",
+            "",
+            f"- discovered runs: `{len(run_dirs)}`",
+            f"- total snapshot events: `{len(records)}`",
+            f"- mode: `list`",
+            "",
+            "Generated files:",
+            "",
+            f"- `{out_dir / 'first_hit_error_distribution.tsv'}`",
+            f"- `{out_dir / 'bucket_summary.tsv'}`",
+        ]
+        (out_dir / "bucket_listing.md").write_text("\n".join(list_lines) + "\n", encoding="utf-8")
+        print(f"\nBucket listing written to: {out_dir}")
+        return 0
+
+    chosen_bucket = choose_bucket_interactive(bucket_rows, args.bucket, args.bucket_width)
+    out_dir = (
+        Path(args.out_dir).expanduser().resolve()
+        if args.out_dir is not None
+        else auto_out_dir(
+            records,
+            mode="analyze",
+            bucket_width_mha=args.bucket_width,
+            chosen_bucket=chosen_bucket,
+        )
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
     write_tsv(
         out_dir / "first_hit_error_distribution.tsv",
         [
@@ -253,15 +423,11 @@ def main() -> int:
         ],
         distribution_rows,
     )
-
-    bucket_rows = summarize_buckets(records)
     write_tsv(
         out_dir / "bucket_summary.tsv",
         ["bucket", "count", "seed_count", "mean_hit_step", "mean_episode"],
         bucket_rows,
     )
-
-    chosen_bucket = choose_bucket_interactive(bucket_rows, args.bucket)
     bucket_center_mha = float(chosen_bucket)
     bucket_records = [rec for rec in records if rec.bucket == chosen_bucket]
 
@@ -295,8 +461,9 @@ def main() -> int:
                 "config": rec.run.config_name,
                 "seed": rec.run.seed_name,
                 "episode": rec.episode_index,
-                "first_hit_step": rec.first_hit_step,
-                "first_hit_error_mha": f"{rec.first_hit_error_mha:.4f}",
+                "snapshot_index": rec.snapshot_index,
+                "event_step": rec.event_step,
+                "event_error_mha": f"{rec.event_error_mha:.4f}",
                 "last_action": rec.last_action_token,
                 "prefix_len": len(rec.action_ids_prefix),
             }
@@ -311,8 +478,9 @@ def main() -> int:
             "config",
             "seed",
             "episode",
-            "first_hit_step",
-            "first_hit_error_mha",
+            "snapshot_index",
+            "event_step",
+            "event_error_mha",
             "last_action",
             "prefix_len",
         ],
@@ -338,7 +506,7 @@ def main() -> int:
             rec.action_ids_prefix,
             rec.run.action_dict,
             rec.run.num_qubits,
-            first_hit_snapshot=rec.first_hit_snapshot,
+            snapshot=rec.snapshot,
         )
         print(
             f"[{idx}/{len(selected)}] {episode_key(rec)} "
@@ -421,8 +589,9 @@ def main() -> int:
                 "episode_key": episode_key(rec),
                 "run_dir": str(rec.run.run_dir),
                 "episode": rec.episode_index,
-                "first_hit_step": rec.first_hit_step,
-                "first_hit_error_mha": f"{rec.first_hit_error_mha:.6f}",
+                "snapshot_index": rec.snapshot_index,
+                "event_step": rec.event_step,
+                "event_error_mha": f"{rec.event_error_mha:.6f}",
                 "baseline_error_mha": f"{baseline_error_mha:.6f}",
                 "retained_error_mha": f"{best_branch.error_mha:.6f}",
                 "delta_error_mha": f"{retained_error_delta_mha:.6f}",
@@ -446,8 +615,9 @@ def main() -> int:
             "episode_key",
             "run_dir",
             "episode",
-            "first_hit_step",
-            "first_hit_error_mha",
+            "snapshot_index",
+            "event_step",
+            "event_error_mha",
             "baseline_error_mha",
             "retained_error_mha",
             "delta_error_mha",
@@ -485,9 +655,10 @@ def main() -> int:
         "analysis_type = critical_structure",
         f"target_error_mha = {'inherit_from_run_meta' if args.target_error_mha is None else f'{args.target_error_mha:.4f}'}",
         f"selected_bucket_mha = {chosen_bucket}",
+        f"bucket_width_mha = {args.bucket_width}",
         f"discovered_runs = {len(run_dirs)}",
-        f"hit_episodes_in_bucket = {len(bucket_records)}",
-        f"selected_episodes = {len(selected)}",
+        f"snapshot_events_in_bucket = {len(bucket_records)}",
+        f"selected_snapshot_events = {len(selected)}",
         f"late_fraction = {args.late_fraction}",
         f"analysis_optimizer_request = {args.analysis_optimizer}",
         f"rotosolve_sweeps = {args.rotosolve_sweeps}",
@@ -526,11 +697,12 @@ def main() -> int:
     report_lines = [
         "# Summary",
         "",
-        f"- target error threshold: `{'inherit_from_run_meta' if args.target_error_mha is None else f'{args.target_error_mha:.4f} mHa'}`",
+        f"- target error threshold: `{'saved snapshot events / legacy accept_err fallback' if args.target_error_mha is None else f'{args.target_error_mha:.4f} mHa'}`",
         f"- selected bucket: `{chosen_bucket} mHa`",
+        f"- bucket width: `{args.bucket_width} mHa`",
         f"- discovered runs: `{len(run_dirs)}`",
-        f"- hit episodes in bucket: `{len(bucket_records)}`",
-        f"- selected episodes for pruning: `{len(selected)}`",
+        f"- snapshot events in bucket: `{len(bucket_records)}`",
+        f"- selected snapshot events for pruning: `{len(selected)}`",
         "",
         "**Anchor Actions**",
         "",
@@ -540,9 +712,9 @@ def main() -> int:
 
     report_lines += [
         "",
-        "**Per-Episode Pruning Summary**",
+        "**Per-Snapshot Pruning Summary**",
         "",
-        "| Episode | Baseline (mHa) | Retained (mHa) | Δerror (mHa) | Original | Fixed | Max Steps | Retained | Removed | Redundancy | Optimizer | Retained Gates |",
+        "| Snapshot | Baseline (mHa) | Retained (mHa) | Δerror (mHa) | Original | Fixed | Max Steps | Retained | Removed | Redundancy | Optimizer | Retained Gates |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in summary_rows:

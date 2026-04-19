@@ -14,6 +14,7 @@ class RunContext:
     config_name: str
     seed_name: str
     accept_err_ha: float | None
+    analysis_save_threshold_ha: float | None
     num_qubits: int
     connectivity: str
     action_dict: dict[int, list[int]]
@@ -24,18 +25,19 @@ class RunContext:
 
 
 @dataclass
-class EpisodeRecord:
+class SnapshotRecord:
     run: RunContext
     episode_index: int
     total_episodes: int
-    first_hit_step: int
-    first_hit_error_ha: float
-    first_hit_error_mha: float
+    snapshot_index: int
+    event_step: int
+    event_error_ha: float
+    event_error_mha: float
     bucket: str
     action_ids_prefix: list[int]
     last_action_id: int
     last_action_token: str
-    first_hit_snapshot: dict[str, Any] = field(default_factory=dict)
+    snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

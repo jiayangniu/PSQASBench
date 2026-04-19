@@ -1,14 +1,14 @@
 # Critical Structure Tool
 
-This tool is used to analyze which circuit structure is most likely responsible for a successful RLQAS episode.
+This tool is used to analyze which circuit structure is most likely responsible for a successful RLQAS snapshot event.
 
 Instead of inspecting only one `best` circuit, it:
 
 - scans one or more training-result directories,
-- finds episodes that first enter a target error regime,
-- samples representative episodes from late training,
+- reads saved low-error circuit snapshots from training traces,
+- samples representative snapshot events from late training,
 - prunes those circuits with counterfactual delete-one-gate analysis,
-- and checks whether different episodes retain the same core structure.
+- and checks whether different snapshot events retain the same core structure.
 
 The main question it tries to answer is:
 
@@ -25,11 +25,11 @@ The tool currently reads:
 Role of each file:
 
 - `episode_traces.txt`
-  Main input. Used to read action sequences and per-step error traces.
+  Main input. Used to read action sequences, per-step error traces, and saved `analysis_snapshots`.
 - `config_used.cfg`
   Still needed to reconstruct action ids into gates and to inherit the training optimizer setup.
 - `run_meta.txt`
-  Only used as a fallback when `--target-error-mha` is not provided.
+  Used to read the saved analysis threshold and, for old runs, as a fallback when `--target-error-mha` is not provided.
 
 ## Basic Usage
 
@@ -45,21 +45,41 @@ Equivalent module entrypoint:
 conda run -n crlqas_env python -m critical_structure_tool <result_dirs...>
 ```
 
-### Example: Interactive Run
+The recommended workflow is now:
 
-This prints the first-hit error distribution and bucket summary first, then lets you choose a bucket.
+1. run `--mode list` to inspect the event-error distribution and bucket summary
+2. then run `--mode analyze` on the bucket you actually want to prune
+
+If `--out-dir` is omitted, the tool now auto-generates a directory name under:
+
+- `critical_structure_analysis/`
+
+The generated name uses a shortened encoding of:
+
+- method,
+- compact molecule id,
+- config suffix,
+- mode,
+- bucket width,
+- and (for analyze mode) the chosen bucket.
+
+### Example: List Buckets First
+
+This only prints and saves the event-error distribution and bucket summary.
 
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
   results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
-  --out-dir critical_structure_analysis/l1_beh2_interactive
+  --mode list \
+  --out-dir critical_structure_analysis/l1_beh2_buckets
 ```
 
-### Example: Direct Analysis Of A Selected Bucket
+### Example: Analyze A Selected Bucket
 
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
   results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  --mode analyze \
   --bucket 0.55 \
   --select-n 6 \
   --beam-width 4 \
@@ -73,6 +93,7 @@ conda run -n crlqas_env python analyze_critical_structure.py \
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
   results/crlqas/L3_CH2_Singlet_8q/LevelCheck_EXP/L3_CH2_Singlet_8q_rotosolve_s2_check \
+  --mode analyze \
   --bucket 0.00 \
   --select-n 4 \
   --beam-width 4 \
@@ -86,15 +107,43 @@ conda run -n crlqas_env python analyze_critical_structure.py \
 
 Only the most important knobs are listed here.
 
+### Workflow mode
+
+- `--mode`
+  - `list`
+    Only generate and print the event-error distribution and bucket summary.
+    No sampling or pruning is done.
+  - `analyze`
+    Run the full pipeline: bucket selection, sampling, reconstruction, and pruning.
+    This is the default.
+
+### Output directory
+
+- `--out-dir`
+  Optional manual output directory.
+
+  If omitted, the tool automatically creates a descriptive subdirectory under:
+  - `critical_structure_analysis/`
+
 ### Event and bucket selection
 
 - `--target-error-mha`
-  Defines the threshold used for the event.
-  If omitted, the tool falls back to `accept_err` in `run_meta.txt`.
+  Optional extra filter on saved snapshot events.
+  If omitted, the tool analyzes all saved snapshot events for new runs and falls back to legacy `accept_err` logic for old runs.
 
 - `--bucket`
-  Selects which first-hit error bucket to analyze.
+  Selects which event-error bucket to analyze.
   If omitted, the tool first prints the available buckets.
+
+- `--bucket-width`
+  Bucket width in mHa.
+  Default:
+  - `0.01`
+
+  This is useful when one bucket is too sparse.
+  For example:
+  - `--bucket-width 0.1`
+    groups events into coarser `0.1 mHa` buckets.
 
 ### Episode sampling
 
@@ -167,7 +216,8 @@ Only the most important knobs are listed here.
 Typical outputs are written under `--out-dir`.
 
 - `first_hit_error_distribution.tsv`
-  Sorted first-hit error distribution for the discovered runs.
+  Sorted event-error distribution for the discovered runs.
+  The file name is kept for backward compatibility.
 
 - `bucket_summary.tsv`
   Coarser bucket summary for quick inspection.
@@ -176,13 +226,16 @@ Typical outputs are written under `--out-dir`.
   Most frequent hit-time last actions for the chosen bucket.
 
 - `selected_episodes.tsv`
-  The episodes selected for pruning.
+  The snapshot events selected for pruning.
+
+- `bucket_listing.md`
+  A short note written by `--mode list` runs.
 
 - `meta.txt`
   Global metadata for this analysis run.
 
 - `summary.tsv`
-  Compact per-episode pruning results.
+  Compact per-snapshot pruning results.
 
 - `summary.md`
   Human-readable version of the pruning summary.
@@ -207,48 +260,58 @@ For each run:
 - read gate decoding and optimizer info from `config_used.cfg`,
 - optionally read `accept_err` from `run_meta.txt` if no explicit target threshold was given.
 
-### 3. Define the event
+### 3. Read analysis snapshot events
 
-The current event is:
+For new runs, training saves:
 
-- the first step where `energy_error <= target_error_threshold`
+- `analysis_snapshots = [...]`
 
-This is not a full jump detector.
-It is a practical proxy for the jump, because in many QAS traces the error drops suddenly instead of decreasing smoothly.
+Each snapshot stores the minimum information needed to warm-start reconstruction:
 
-### 4. Build the first-hit error distribution
+- the zero-based step index,
+- the optimized rotation parameters at that step,
+- and which action-prefix steps those parameters belong to.
 
-For every successful episode, the tool records:
+If a run uses the older trace format, the tool falls back to the legacy single-event:
 
-- the first-hit step,
-- the first-hit error,
+- `first_hit_snapshot`
+
+### 4. Build the event-error distribution
+
+For every saved snapshot event, the tool records:
+
+- the event step,
+- the event error,
 - the action prefix up to that point,
-- the last action at the hit time.
+- the last action at the saved event.
 
 It then writes `first_hit_error_distribution.tsv` so the user can inspect the error landscape before choosing what regime to analyze.
+
+This can now be run independently using:
+
+- `--mode list`
 
 ### 5. Choose the target regime
 
 The current implementation still analyzes one bucket at a time.
-The bucket is based on first-hit error in mHa.
+The bucket is based on saved event error in mHa.
 
 Conceptually, this bucket is meant to represent:
 
 - a dominant learned mode,
 - or a particular success regime that the user wants to inspect.
 
-### 6. Sample representative episodes
+### 6. Sample representative snapshot events
 
-Episodes are sampled from the last `late_fraction` part of training.
+Snapshot events are sampled from the last `late_fraction` part of training.
 Within that late pool, the tool samples rather than always taking the final few episodes.
 
 This is meant to bias the analysis toward learned late-stage behavior while avoiding overfitting to only the very last episodes.
 
-### 7. Reconstruct the first-hit circuit
+### 7. Reconstruct the saved-event circuit
 
-The tool reconstructs the circuit from the first-hit action prefix.
-At this stage, only the discrete structure is faithfully recovered.
-Continuous parameters are re-optimized later.
+The tool reconstructs the circuit from the saved action prefix and hydrates the rotation gates with the saved snapshot parameters.
+This is more faithful than cold-start reconstruction from zero angles.
 
 ### 8. Re-optimize the reconstructed circuit
 
@@ -302,9 +365,9 @@ Important detail:
 - `--prune-budget` is the total evaluation budget
 - `--max-prune-steps` should not be the main user-controlled budget
 
-### 12. Compare retained structures across episodes
+### 12. Compare retained structures across snapshot events
 
-After pruning all selected episodes, the tool compares the retained structures:
+After pruning all selected snapshot events, the tool compares the retained structures:
 
 - exact retained structure matches,
 - common gate signatures,
@@ -316,18 +379,20 @@ This is the final output used to judge whether a success regime corresponds to a
 
 The biggest unresolved problem is **reconstruction fidelity on harder systems**.
 
-For easy systems such as `L1_BeH2_STO3G_6q`, the reconstructed baseline can still remain close to the trace-recorded first-hit regime, so the retained structures are often interpretable.
+For easy systems such as `L1_BeH2_STO3G_6q`, the reconstructed baseline can still remain close to the trace-recorded low-error regime, so the retained structures are often interpretable.
 
 For harder cases such as `L3_CH2_Singlet_8q`, this often breaks:
 
-- the trace may record a first-hit error in the `0.00 mHa` bucket,
+- the trace may record a saved event in the `0.00 mHa` bucket,
 - but after reconstructing the same action prefix and re-optimizing it from scratch, the tool may land in a completely different basin,
 - producing a very large reconstructed baseline error.
 
-This happens because the tool currently reconstructs:
+This used to happen because the tool reconstructed:
 
 - the discrete action prefix,
-- but **not** the original warm-start parameter trajectory used during training.
+- but **not** the original warm-start parameter context used during training.
+
+The new `analysis_snapshots` format improves this substantially by saving per-event gate parameters, but very path-sensitive systems may still require richer replay information in the future.
 
 So for difficult or branch-sensitive problems, the current tool may be pruning a circuit in the wrong basin.
 

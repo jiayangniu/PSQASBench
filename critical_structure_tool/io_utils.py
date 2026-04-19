@@ -5,10 +5,11 @@ import configparser
 import json
 import re
 from collections import Counter, defaultdict
+from decimal import Decimal, ROUND_HALF_UP
 from itertools import product
 from pathlib import Path
 
-from .types import EpisodeRecord, RunContext
+from .types import RunContext, SnapshotRecord
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +86,18 @@ def read_accept_err(run_dir: Path) -> float | None:
     return None
 
 
+def read_analysis_save_threshold(run_dir: Path) -> float | None:
+    meta_path = run_dir / "run_meta.txt"
+    if not meta_path.exists():
+        return None
+    for line in meta_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("analysis_save_threshold_ha ="):
+            value = line.split("=", 1)[1].strip()
+            if value:
+                return float(value)
+    return None
+
+
 def parse_episode_traces(traces_path: Path) -> list[dict]:
     episodes = []
     current: dict | None = None
@@ -130,11 +143,14 @@ def get_trace_series(ep: dict, *candidate_keys: str) -> list:
     return []
 
 
-def get_first_hit_snapshot(ep: dict) -> dict:
-    value = ep.get("first_hit_snapshot", {})
-    if isinstance(value, dict):
-        return value
-    return {}
+def get_analysis_snapshots(ep: dict) -> list[dict]:
+    value = ep.get("analysis_snapshots", None)
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    legacy = ep.get("first_hit_snapshot", {})
+    if isinstance(legacy, dict) and legacy:
+        return [legacy]
+    return []
 
 
 def action_id_from_item(action_item) -> int:
@@ -211,6 +227,7 @@ def build_run_context(run_dir: Path) -> RunContext:
         config_name=config_name,
         seed_name=seed_name,
         accept_err_ha=read_accept_err(run_dir),
+        analysis_save_threshold_ha=read_analysis_save_threshold(run_dir),
         num_qubits=num_qubits,
         connectivity=connectivity,
         action_dict=action_dict,
@@ -221,8 +238,22 @@ def build_run_context(run_dir: Path) -> RunContext:
     )
 
 
-def bucket_label(error_mha: float) -> str:
-    return f"{round(error_mha, 2):.2f}"
+def bucket_decimals(bucket_width_mha: float) -> int:
+    text = format(bucket_width_mha, "f").rstrip("0").rstrip(".")
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1])
+
+
+def bucket_label(error_mha: float, bucket_width_mha: float) -> str:
+    width = Decimal(str(bucket_width_mha))
+    if width <= 0:
+        raise ValueError("bucket_width_mha must be positive.")
+    decimals = bucket_decimals(bucket_width_mha)
+    quantized = (
+        Decimal(str(error_mha)) / width
+    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * width
+    return f"{quantized:.{decimals}f}"
 
 
 def display_error_label(error_mha: float) -> str:
@@ -230,31 +261,72 @@ def display_error_label(error_mha: float) -> str:
         return "0"
     return f"{error_mha:.2g}"
 
-def collect_episode_records(run_dirs: list[Path], target_error_mha: float | None) -> list[EpisodeRecord]:
-    records: list[EpisodeRecord] = []
+def collect_snapshot_records(
+    run_dirs: list[Path],
+    target_error_mha: float | None,
+    bucket_width_mha: float,
+) -> list[SnapshotRecord]:
+    records: list[SnapshotRecord] = []
 
     for run_dir in run_dirs:
         ctx = build_run_context(run_dir)
-        if target_error_mha is None:
-            if ctx.accept_err_ha is None:
-                raise ValueError(
-                    f"No target error provided and no accept_err found in run_meta.txt for {run_dir}"
-                )
-            target_error_ha = ctx.accept_err_ha
-        else:
-            target_error_ha = target_error_mha / 1000.0
+        requested_target_error_ha = None if target_error_mha is None else target_error_mha / 1000.0
         episodes = parse_episode_traces(run_dir / "episode_traces.txt")
         total_eps = len(episodes)
 
         for ep in episodes:
+            effective_target_error_ha = requested_target_error_ha
+            if effective_target_error_ha is None:
+                effective_target_error_ha = ctx.accept_err_ha
+
             actions = ep.get("actions", [])
             errors = get_trace_series(ep, "energy_errors_ha", "energy_errors")
-            first_hit_snapshot = get_first_hit_snapshot(ep)
             action_ids = [action_id_from_item(item) for item in actions]
+            snapshots = get_analysis_snapshots(ep)
+
+            if snapshots:
+                for snap_idx, snapshot in enumerate(snapshots):
+                    try:
+                        step_idx = int(snapshot["step"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if step_idx < 0 or step_idx >= len(action_ids) or step_idx >= len(errors):
+                        continue
+                    event_err_ha = float(errors[step_idx])
+                    if effective_target_error_ha is not None and event_err_ha > effective_target_error_ha:
+                        continue
+                    prefix_ids = action_ids[: step_idx + 1]
+                    if not prefix_ids:
+                        continue
+                    last_action_id = prefix_ids[-1]
+                    event_err_mha = event_err_ha * 1000.0
+                    records.append(
+                        SnapshotRecord(
+                            run=ctx,
+                            episode_index=int(ep["episode"]),
+                            total_episodes=total_eps,
+                            snapshot_index=snap_idx,
+                            event_step=step_idx + 1,
+                            event_error_ha=event_err_ha,
+                            event_error_mha=event_err_mha,
+                            bucket=bucket_label(event_err_mha, bucket_width_mha),
+                            action_ids_prefix=prefix_ids,
+                            last_action_id=last_action_id,
+                            last_action_token=action_token(last_action_id, ctx.action_dict, ctx.num_qubits),
+                            snapshot=snapshot,
+                        )
+                    )
+                continue
+
+            if effective_target_error_ha is None:
+                raise ValueError(
+                    f"No target error provided, no analysis snapshots found, and no accept_err found in run_meta.txt for {run_dir}"
+                )
+
             hit_idx = None
             hit_err_ha = None
             for idx, err in enumerate(errors):
-                if float(err) <= target_error_ha:
+                if float(err) <= effective_target_error_ha:
                     hit_idx = idx
                     hit_err_ha = float(err)
                     break
@@ -266,44 +338,45 @@ def collect_episode_records(run_dirs: list[Path], target_error_mha: float | None
             prefix_ids = action_ids[: hit_idx + 1]
             last_action_id = prefix_ids[-1]
             records.append(
-                EpisodeRecord(
+                SnapshotRecord(
                     run=ctx,
                     episode_index=int(ep["episode"]),
                     total_episodes=total_eps,
-                    first_hit_step=hit_idx + 1,
-                    first_hit_error_ha=hit_err_ha,
-                    first_hit_error_mha=hit_err_mha,
-                    bucket=bucket_label(hit_err_mha),
+                    snapshot_index=0,
+                    event_step=hit_idx + 1,
+                    event_error_ha=hit_err_ha,
+                    event_error_mha=hit_err_mha,
+                    bucket=bucket_label(hit_err_mha, bucket_width_mha),
                     action_ids_prefix=prefix_ids,
                     last_action_id=last_action_id,
                     last_action_token=action_token(last_action_id, ctx.action_dict, ctx.num_qubits),
-                    first_hit_snapshot=first_hit_snapshot,
+                    snapshot=(snapshots[0] if snapshots else {}),
                 )
             )
     return records
 
 
-def summarize_first_hit_distribution(records: list[EpisodeRecord]) -> list[dict]:
-    grouped: dict[str, list[EpisodeRecord]] = defaultdict(list)
+def summarize_first_hit_distribution(records: list[SnapshotRecord]) -> list[dict]:
+    grouped: dict[str, list[SnapshotRecord]] = defaultdict(list)
     for rec in records:
-        grouped[display_error_label(rec.first_hit_error_mha)].append(rec)
+        grouped[display_error_label(rec.event_error_mha)].append(rec)
 
     rows = []
-    for label, recs in sorted(grouped.items(), key=lambda item: min(r.first_hit_error_mha for r in item[1])):
+    for label, recs in sorted(grouped.items(), key=lambda item: min(r.event_error_mha for r in item[1])):
         rows.append(
             {
                 "display_value": label,
                 "count": len(recs),
                 "seed_count": len({str(r.run.run_dir) for r in recs}),
-                "min_first_hit_error_mha": f"{min(r.first_hit_error_mha for r in recs):.10f}",
-                "max_first_hit_error_mha": f"{max(r.first_hit_error_mha for r in recs):.10f}",
+                "min_first_hit_error_mha": f"{min(r.event_error_mha for r in recs):.10f}",
+                "max_first_hit_error_mha": f"{max(r.event_error_mha for r in recs):.10f}",
             }
         )
     return rows
 
 
-def summarize_buckets(records: list[EpisodeRecord]) -> list[dict]:
-    bucket_map: dict[str, list[EpisodeRecord]] = defaultdict(list)
+def summarize_buckets(records: list[SnapshotRecord]) -> list[dict]:
+    bucket_map: dict[str, list[SnapshotRecord]] = defaultdict(list)
     for rec in records:
         bucket_map[rec.bucket].append(rec)
 
@@ -311,7 +384,7 @@ def summarize_buckets(records: list[EpisodeRecord]) -> list[dict]:
     for bucket in sorted(bucket_map, key=lambda x: float(x)):
         recs = bucket_map[bucket]
         seed_count = len({str(rec.run.run_dir) for rec in recs})
-        mean_hit_step = sum(rec.first_hit_step for rec in recs) / len(recs)
+        mean_hit_step = sum(rec.event_step for rec in recs) / len(recs)
         mean_episode = sum(rec.episode_index for rec in recs) / len(recs)
         rows.append(
             {
@@ -325,12 +398,14 @@ def summarize_buckets(records: list[EpisodeRecord]) -> list[dict]:
     return rows
 
 
-def choose_bucket_interactive(bucket_rows: list[dict], requested: str | None) -> str:
+def choose_bucket_interactive(
+    bucket_rows: list[dict], requested: str | None, bucket_width_mha: float
+) -> str:
     if not bucket_rows:
-        raise ValueError("No episodes reached the requested target error threshold.")
+        raise ValueError("No snapshot events reached the requested target error threshold.")
     bucket_values = {row["bucket"] for row in bucket_rows}
     if requested is not None:
-        normalized = f"{float(requested):.2f}"
+        normalized = bucket_label(float(requested), bucket_width_mha)
         if normalized not in bucket_values:
             raise ValueError(f"Bucket {normalized} not found in available buckets: {sorted(bucket_values)}")
         return normalized
@@ -350,29 +425,29 @@ def choose_bucket_interactive(bucket_rows: list[dict], requested: str | None) ->
 
     if not answer:
         return bucket_rows[0]["bucket"]
-    normalized = f"{float(answer):.2f}"
+    normalized = bucket_label(float(answer), bucket_width_mha)
     if normalized not in bucket_values:
         raise ValueError(f"Bucket {normalized} not found in available buckets: {sorted(bucket_values)}")
     return normalized
 
 
-def compute_anchor_action_counts(records: list[EpisodeRecord]) -> Counter[str]:
+def compute_anchor_action_counts(records: list[SnapshotRecord]) -> Counter[str]:
     return Counter(rec.last_action_token for rec in records)
 
 
 def sample_representative_episodes(
-    records: list[EpisodeRecord],
+    records: list[SnapshotRecord],
     n_select: int,
     late_fraction: float,
     rng,
-) -> list[EpisodeRecord]:
-    by_run: dict[Path, list[EpisodeRecord]] = defaultdict(list)
+) -> list[SnapshotRecord]:
+    by_run: dict[Path, list[SnapshotRecord]] = defaultdict(list)
     for rec in records:
         by_run[rec.run.run_dir].append(rec)
 
-    prepared: dict[Path, list[EpisodeRecord]] = {}
+    prepared: dict[Path, list[SnapshotRecord]] = {}
     for run_dir, recs in by_run.items():
-        recs_sorted = sorted(recs, key=lambda r: r.episode_index)
+        recs_sorted = sorted(recs, key=lambda r: (r.episode_index, r.snapshot_index))
         min_episode = int(recs_sorted[-1].total_episodes * (1.0 - late_fraction))
         late_recs = [r for r in recs_sorted if r.episode_index >= min_episode]
         pool = late_recs if late_recs else recs_sorted
@@ -380,7 +455,7 @@ def sample_representative_episodes(
         rng.shuffle(pool)
         prepared[run_dir] = pool
 
-    selected: list[EpisodeRecord] = []
+    selected: list[SnapshotRecord] = []
     while len(selected) < n_select:
         progressed = False
         for run_dir in sorted(prepared):

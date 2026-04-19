@@ -33,15 +33,15 @@ def action_id_to_gate(
     )
 
 
-def apply_first_hit_snapshot(
+def apply_snapshot(
     gates: list[GateSpec],
-    first_hit_snapshot: dict | None,
+    snapshot: dict | None,
 ) -> list[GateSpec]:
-    if not first_hit_snapshot:
+    if not snapshot:
         return gates
 
-    gate_params = first_hit_snapshot.get("gate_params", [])
-    param_step_indices = first_hit_snapshot.get("param_step_indices", [])
+    gate_params = snapshot.get("gate_params", [])
+    param_step_indices = snapshot.get("param_step_indices", [])
     if not isinstance(gate_params, list) or not isinstance(param_step_indices, list):
         return gates
     if len(gate_params) != len(param_step_indices):
@@ -67,13 +67,15 @@ def prefix_to_gates(
     action_ids: list[int],
     action_dict: dict[int, list[int]],
     num_qubits: int,
+    snapshot: dict | None = None,
     first_hit_snapshot: dict | None = None,
 ) -> list[GateSpec]:
     gates = [
         action_id_to_gate(action_id, step_index=i, action_dict=action_dict, num_qubits=num_qubits)
         for i, action_id in enumerate(action_ids)
     ]
-    return apply_first_hit_snapshot(gates, first_hit_snapshot)
+    chosen_snapshot = snapshot if snapshot is not None else first_hit_snapshot
+    return apply_snapshot(gates, chosen_snapshot)
 
 
 def build_qulacs_circuit(gates: list[GateSpec], n_qubits: int) -> QC:
