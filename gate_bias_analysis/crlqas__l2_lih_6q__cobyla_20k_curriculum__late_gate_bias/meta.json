@@ -1,0 +1,11 @@
+{
+  "late_fraction": 0.3333333333333333,
+  "selected_episodes": 6668,
+  "average_actions_per_episode": 6.0413917216556685,
+  "average_rotation_gates_per_episode": 3.3908218356328734,
+  "average_cnot_gates_per_episode": 2.6505698860227955,
+  "run_dirs": [
+    "/home/ubuntu/NeurIPS2026/PSQASBench/results/crlqas/L2_LiH_Equil_6q/Formal_EXP/L2_LiH_Equil_6q_cobyla_20k_curriculum/seed11111"
+  ],
+  "figure_dir": "/home/ubuntu/NeurIPS2026/PSQASBench/figure/analyze_late_gate_bias/crlqas__l2_lih_6q__cobyla_20k_curriculum__late_gate_bias"
+}

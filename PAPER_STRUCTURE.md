@@ -54,9 +54,8 @@ This lets us stay honest about what the current methods actually optimize, while
 |------|------|------|------|
 | L1 | Minimalism | `L1_BeH2_STO3G_6q` | replaces over-trivial `H2` and over-hard `BH` |
 | L2 | Asymmetry / interaction hub | `L2_LiH_Equil_6q` | cleanest current neutral asymmetry case |
-| L3 | Degeneracy / stability | `L3_CH2_Singlet_6q` | keep full-space as main task; sector analysis as supplement |
-| L4 | Representation / correlation | `L4_H2_Stretch_4q` | main anchor |
-| L4-supp | Larger correlated supplement | `L4_H2O_StrongCorr_8q` | supplementary, not the sole L4 definition |
+| L3 | Degeneracy / stability | `L3_CH2_Singlet_8q` | near-degeneracy / branch-sensitive case with stronger structure-search burden |
+| L4 | Representation / correlation | `L4_H2O_StrongCorr_8q` | main 8-qubit correlated anchor |
 | L5 | Topology / routing pressure | `L5_H4_Chain_8q` | intended for connectivity-sensitive experiments |
 | L6 | Scalability ladder | `L6_BeH2_631G_8q`, `L6_BeH2_6311G_10q`, `L6_BeH2_CCPVDZ_12q` | same-family scaling story |
 

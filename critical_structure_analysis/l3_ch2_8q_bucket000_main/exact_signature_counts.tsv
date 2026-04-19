@@ -1,0 +1,11 @@
+rank	count	retained_gates
+1	1	RY(q=0) | RY(q=6) | CNOT(6->4) | CNOT(0->4)
+2	1	RY(q=0) | RX(q=6) | RX(q=4) | CNOT(6->7) | CNOT(0->4) | RX(q=7) | RX(q=7) | RX(q=7) | RX(q=7) | RX(q=7)
+3	1	RX(q=6) | CNOT(6->5) | CNOT(5->1) | RX(q=5) | CNOT(6->1) | CNOT(6->4) | RY(q=0) | CNOT(0->4)
+4	1	RY(q=5) | CNOT(5->4) | CNOT(4->5) | RX(q=7) | CNOT(4->1) | RX(q=6) | CNOT(1->0) | CNOT(4->1) | CNOT(6->0)
+5	1	CNOT(6->4) | RX(q=0) | RY(q=4) | CNOT(4->0) | RY(q=6)
+6	1	RY(q=1) | RY(q=5) | CNOT(1->7) | CNOT(5->1)
+7	1	RY(q=3) | RY(q=4) | CNOT(3->6) | CNOT(4->7) | RX(q=3) | RX(q=4) | CNOT(7->2) | CNOT(7->0) | CNOT(7->2) | CNOT(0->7)
+8	1	RX(q=7) | RY(q=5) | CNOT(5->1) | RY(q=5)
+9	1	RY(q=7) | RX(q=6) | CNOT(6->2) | CNOT(2->3) | CNOT(3->6) | CNOT(7->0) | RY(q=2) | CNOT(3->4) | RY(q=0) | CNOT(3->5) | CNOT(4->1) | CNOT(7->3) | RY(q=1) | CNOT(5->4) | CNOT(7->3) | RY(q=3) | CNOT(1->5)
+10	1	RY(q=1) | CNOT(1->6) | RY(q=1) | RY(q=4) | CNOT(6->0) | CNOT(4->0)

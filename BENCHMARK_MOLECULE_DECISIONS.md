@@ -17,9 +17,8 @@ items are intentionally removed.
 |------|------|------|------|
 | L1 | Minimalism / depth sensitivity | BeH2 (STO-3G, 6 qubits) | `L1_BeH2_STO3G_6q` |
 | L2 | Asymmetry / interaction hubs | LiH (equilibrium, 6 qubits) | `L2_LiH_Equil_6q` |
-| L3 | Near-degeneracy / stability | CH2 singlet (JW, 6 qubits) | `L3_CH2_Singlet_6q` |
-| L4 | Representation / correlation burden | H2 stretch (main) | `L4_H2_Stretch_4q` |
-| L4 supplementary | Larger correlated companion case | stretched H2O | `L4_H2O_StrongCorr_8q` |
+| L3 | Near-degeneracy / stability | CH2 singlet (JW, 8 qubits) | `L3_CH2_Singlet_8q` |
+| L4 | Representation / correlation burden | stretched H2O (8 qubits) | `L4_H2O_StrongCorr_8q` |
 | L5 | Topology / routing pressure | H4 chain (8 qubits) | `L5_H4_Chain_8q` |
 | L6 | Scalability ladder | BeH2 ladder (8q / 10q / 12q) | `L6_BeH2_631G_8q`, `L6_BeH2_6311G_10q`, `L6_BeH2_CCPVDZ_12q` |
 | L6 optional extension | Larger scalability stress test | BeH2 (14 qubits) | `L6_BeH2_CCPVDZ_14q` |
@@ -27,8 +26,7 @@ items are intentionally removed.
 Short paper-ready summary:
 
 > PSQASBench currently uses `L1 = BeH2_STO3G_6q`, `L2 = LiH_Equil_6q`,
-> `L3 = CH2_Singlet_6q`, `L4 = H2_Stretch_4q` with stretched `H2O_8q` as a
-> supplementary larger correlated case, `L5 = H4_Chain_8q`, and
+> `L3 = CH2_Singlet_8q`, `L4 = H2O_StrongCorr_8q`, `L5 = H4_Chain_8q`, and
 > `L6 = BeH2 8q / 10q / 12q`, with `14q` treated as an optional extension.
 
 ---
@@ -146,7 +144,7 @@ current case for that role while remaining small and chemically recognizable.
 
 So L3 is:
 
-- `L3_CH2_Singlet_6q`
+- `L3_CH2_Singlet_8q`
 
 Generation source:
 
