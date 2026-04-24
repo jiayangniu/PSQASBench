@@ -7,6 +7,49 @@ from qulacs import QuantumCircuit as QC, QuantumState
 from .types import GateSpec
 
 
+def gate_dicts_to_gates(gate_dicts: list[dict]) -> list[GateSpec]:
+    """Convert a list of direct gate-spec dicts (TFQAS/DARTS format) to GateSpec objects.
+
+    Each dict must have one of the following shapes::
+
+        {"type": "cnot", "ctrl": int, "targ": int}
+        {"type": "rot",  "q": int, "axis": int, "angle": float}  # axis: 1=RX 2=RY 3=RZ
+
+    The *step_index* and *action_id* are both set to the gate's position in the list so
+    that ``structure_signature`` and ``detailed_signature`` remain stable and unique.
+    """
+    gates: list[GateSpec] = []
+    for i, d in enumerate(gate_dicts):
+        gate_type = str(d.get("type", "")).lower()
+        if gate_type == "cnot":
+            gates.append(
+                GateSpec(
+                    gate_type="cnot",
+                    action_id=i,
+                    step_index=i,
+                    ctrl=int(d["ctrl"]),
+                    targ=int(d["targ"]),
+                )
+            )
+        elif gate_type == "rot":
+            gates.append(
+                GateSpec(
+                    gate_type="rot",
+                    action_id=i,
+                    step_index=i,
+                    q=int(d["q"]),
+                    axis=int(d["axis"]),
+                    angle=float(d.get("angle", 0.0)),
+                )
+            )
+        else:
+            # Unknown gate type (e.g. "ucc_single", "ucc_double" from GQE) —
+            # skip silently.  Circuit-level analysis is not applicable for
+            # these gates; method-specific analysis should be done separately.
+            continue
+    return gates
+
+
 def action_id_to_gate(
     action_id: int,
     step_index: int,
@@ -150,28 +193,39 @@ def optimize_circuit(
 
     method = str(optimizer).lower()
     if method == "rotosolve":
-        if init_angles is not None and len(init_angles) == rot_count:
-            angles = np.array(init_angles, dtype=float)
-        else:
-            angles = stored.copy()
-
         probe_vals = np.array([0.0, np.pi / 2.0, np.pi], dtype=float)
-        for _ in range(max(1, int(rotosolve_sweeps))):
-            for i in range(rot_count):
-                original = angles[i]
-                e_vals = []
-                for probe in probe_vals:
-                    angles[i] = probe
-                    e_vals.append(cost(angles))
-                angles[i] = original
-                e0, epi2, epi = e_vals
-                A = (e0 - epi) / 2.0
-                C = (e0 + epi) / 2.0
-                B = epi2 - C
-                angles[i] = float(np.arctan2(-B, -A))
 
-        best_energy = cost(angles)
-        return float(best_energy), clone_with_angles(gates, angles)
+        best_energy = float("inf")
+        best_angles = stored.copy()
+
+        for restart in range(max(1, n_restarts)):
+            if restart == 0 and init_angles is not None and len(init_angles) == rot_count:
+                angles = np.array(init_angles, dtype=float)
+            elif restart == 0:
+                angles = stored.copy()
+            else:
+                angles = rng.uniform(-np.pi, np.pi, rot_count)
+
+            for _ in range(max(1, int(rotosolve_sweeps))):
+                for i in range(rot_count):
+                    original = angles[i]
+                    e_vals = []
+                    for probe in probe_vals:
+                        angles[i] = probe
+                        e_vals.append(cost(angles))
+                    angles[i] = original
+                    e0, epi2, epi = e_vals
+                    A = (e0 - epi) / 2.0
+                    C = (e0 + epi) / 2.0
+                    B = epi2 - C
+                    angles[i] = float(np.arctan2(-B, -A))
+
+            energy = cost(angles)
+            if energy < best_energy:
+                best_energy = energy
+                best_angles = angles.copy()
+
+        return float(best_energy), clone_with_angles(gates, best_angles)
 
     best_energy = float("inf")
     best_angles = stored.copy()

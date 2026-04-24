@@ -65,12 +65,13 @@ def redirect_output(file_path: Path):
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
-METHODS = ["crlqas", "hyrlqas", "qdarts", "tfqas"]
+METHODS = ["crlqas", "hyrlqas", "qdarts", "tfqas", "gqeqas"]
 METHOD_CONFIG_DIR = {
     "crlqas":  "crlqas",
     "hyrlqas": "hyrlqas",
     "qdarts":  "qdarts",
     "tfqas":   "tfqas",
+    "gqeqas":  "gqeqas",
 }
 
 
@@ -157,4 +158,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
     if method == "tfqas":
         from TFQAS import TFQASRunner
         return TFQASRunner(config_path, mol_path, result_dir, seed, device)
+    if method == "gqeqas":
+        from GQEQAS import GQERunner
+        return GQERunner(config_path, mol_path, result_dir, seed, device)
     raise ValueError(f"Unknown method '{method}'. Implemented so far: {METHODS}")

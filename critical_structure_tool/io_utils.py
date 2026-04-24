@@ -153,6 +153,20 @@ def get_analysis_snapshots(ep: dict) -> list[dict]:
     return []
 
 
+def _last_token_from_gate_dicts(gate_dicts: list[dict]) -> str:
+    """Derive a human-readable token for the last gate in a gates_direct list."""
+    if not gate_dicts:
+        return "unknown"
+    d = gate_dicts[-1]
+    gate_type = str(d.get("type", "")).lower()
+    if gate_type == "cnot":
+        return f"CNOT({d['ctrl']}->{d['targ']})"
+    if gate_type == "rot":
+        axis_name = {1: "RX", 2: "RY", 3: "RZ"}.get(int(d.get("axis", 0)), "R?")
+        return f"{axis_name}(q={d['q']})"
+    return "unknown"
+
+
 def action_id_from_item(action_item) -> int:
     if isinstance(action_item, dict):
         return int(action_item["action"])
@@ -218,6 +232,11 @@ def build_run_context(run_dir: Path) -> RunContext:
         rel = parts[idx + 1 :]
         if len(rel) >= 5:
             method, molecule, exp_group, config_name, seed_name = rel[:5]
+        elif len(rel) >= 4:
+            # Support direct-gate method layouts such as:
+            #   results/qdarts/<molecule>/<config>/seed11111
+            method, molecule, config_name, seed_name = rel[:4]
+            exp_group = config_name
 
     return RunContext(
         run_dir=run_dir,
@@ -267,6 +286,7 @@ def collect_snapshot_records(
     bucket_width_mha: float,
 ) -> list[SnapshotRecord]:
     records: list[SnapshotRecord] = []
+    seen_keys: set[tuple] = set()  # (run_dir, episode_index, snapshot_index)
 
     for run_dir in run_dirs:
         ctx = build_run_context(run_dir)
@@ -275,48 +295,98 @@ def collect_snapshot_records(
         total_eps = len(episodes)
 
         for ep in episodes:
-            effective_target_error_ha = requested_target_error_ha
-            if effective_target_error_ha is None:
-                effective_target_error_ha = ctx.accept_err_ha
-
             actions = ep.get("actions", [])
             errors = get_trace_series(ep, "energy_errors_ha", "energy_errors")
             action_ids = [action_id_from_item(item) for item in actions]
             snapshots = get_analysis_snapshots(ep)
 
             if snapshots:
+                effective_target_error_ha = requested_target_error_ha
+                if effective_target_error_ha is None:
+                    # For modern runs with saved analysis snapshots, the default
+                    # behavior is to analyze all snapshot events saved under the
+                    # run's analysis_save_threshold.  Falling back to accept_err
+                    # here would wrongly discard valid snapshots whenever
+                    # analysis_save_threshold > accept_err.
+                    effective_target_error_ha = (
+                        ctx.analysis_save_threshold_ha
+                        if ctx.analysis_save_threshold_ha is not None
+                        else ctx.accept_err_ha
+                    )
                 for snap_idx, snapshot in enumerate(snapshots):
                     try:
                         step_idx = int(snapshot["step"])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    if step_idx < 0 or step_idx >= len(action_ids) or step_idx >= len(errors):
+
+                    # Check for gates_direct (TFQAS/DARTS format) inside the snapshot.
+                    gates_direct_raw = snapshot.get("gates_direct")
+                    has_gates_direct = isinstance(gates_direct_raw, list) and len(gates_direct_raw) > 0
+
+                    dedup_key = (run_dir, int(ep["episode"]), snap_idx)
+                    if dedup_key in seen_keys:
                         continue
-                    event_err_ha = float(errors[step_idx])
-                    if effective_target_error_ha is not None and event_err_ha > effective_target_error_ha:
-                        continue
-                    prefix_ids = action_ids[: step_idx + 1]
-                    if not prefix_ids:
-                        continue
-                    last_action_id = prefix_ids[-1]
-                    event_err_mha = event_err_ha * 1000.0
-                    records.append(
-                        SnapshotRecord(
-                            run=ctx,
-                            episode_index=int(ep["episode"]),
-                            total_episodes=total_eps,
-                            snapshot_index=snap_idx,
-                            event_step=step_idx + 1,
-                            event_error_ha=event_err_ha,
-                            event_error_mha=event_err_mha,
-                            bucket=bucket_label(event_err_mha, bucket_width_mha),
-                            action_ids_prefix=prefix_ids,
-                            last_action_id=last_action_id,
-                            last_action_token=action_token(last_action_id, ctx.action_dict, ctx.num_qubits),
-                            snapshot=snapshot,
+                    seen_keys.add(dedup_key)
+
+                    if has_gates_direct:
+                        # Direct-gate method: step_idx indexes into errors only.
+                        if step_idx < 0 or step_idx >= len(errors):
+                            continue
+                        event_err_ha = float(errors[step_idx])
+                        if effective_target_error_ha is not None and event_err_ha > effective_target_error_ha:
+                            continue
+                        event_err_mha = event_err_ha * 1000.0
+                        records.append(
+                            SnapshotRecord(
+                                run=ctx,
+                                episode_index=int(ep["episode"]),
+                                total_episodes=total_eps,
+                                snapshot_index=snap_idx,
+                                event_step=step_idx + 1,
+                                event_error_ha=event_err_ha,
+                                event_error_mha=event_err_mha,
+                                bucket=bucket_label(event_err_mha, bucket_width_mha),
+                                action_ids_prefix=[],
+                                last_action_id=-1,
+                                last_action_token=_last_token_from_gate_dicts(gates_direct_raw),
+                                snapshot=snapshot,
+                                gates_direct=list(gates_direct_raw),
+                            )
                         )
-                    )
+                    else:
+                        # RL method: step_idx indexes into both action_ids and errors.
+                        if step_idx < 0 or step_idx >= len(action_ids) or step_idx >= len(errors):
+                            continue
+                        event_err_ha = float(errors[step_idx])
+                        if effective_target_error_ha is not None and event_err_ha > effective_target_error_ha:
+                            continue
+                        prefix_ids = action_ids[: step_idx + 1]
+                        if not prefix_ids:
+                            continue
+                        last_action_id = prefix_ids[-1]
+                        event_err_mha = event_err_ha * 1000.0
+                        records.append(
+                            SnapshotRecord(
+                                run=ctx,
+                                episode_index=int(ep["episode"]),
+                                total_episodes=total_eps,
+                                snapshot_index=snap_idx,
+                                event_step=step_idx + 1,
+                                event_error_ha=event_err_ha,
+                                event_error_mha=event_err_mha,
+                                bucket=bucket_label(event_err_mha, bucket_width_mha),
+                                action_ids_prefix=prefix_ids,
+                                last_action_id=last_action_id,
+                                last_action_token=action_token(last_action_id, ctx.action_dict, ctx.num_qubits),
+                                snapshot=snapshot,
+                                gates_direct=None,
+                            )
+                        )
                 continue
+
+            effective_target_error_ha = requested_target_error_ha
+            if effective_target_error_ha is None:
+                effective_target_error_ha = ctx.accept_err_ha
 
             if effective_target_error_ha is None:
                 raise ValueError(
@@ -335,6 +405,10 @@ def collect_snapshot_records(
                 continue
 
             hit_err_mha = hit_err_ha * 1000.0
+            dedup_key = (run_dir, int(ep["episode"]), 0)
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
             prefix_ids = action_ids[: hit_idx + 1]
             last_action_id = prefix_ids[-1]
             records.append(
@@ -439,6 +513,7 @@ def sample_representative_episodes(
     records: list[SnapshotRecord],
     n_select: int,
     late_fraction: float,
+    episode_range: tuple[int, int] | None,
     rng,
 ) -> list[SnapshotRecord]:
     by_run: dict[Path, list[SnapshotRecord]] = defaultdict(list)
@@ -448,9 +523,13 @@ def sample_representative_episodes(
     prepared: dict[Path, list[SnapshotRecord]] = {}
     for run_dir, recs in by_run.items():
         recs_sorted = sorted(recs, key=lambda r: (r.episode_index, r.snapshot_index))
-        min_episode = int(recs_sorted[-1].total_episodes * (1.0 - late_fraction))
-        late_recs = [r for r in recs_sorted if r.episode_index >= min_episode]
-        pool = late_recs if late_recs else recs_sorted
+        if episode_range is not None:
+            start_ep, end_ep = episode_range
+            pool = [r for r in recs_sorted if start_ep <= r.episode_index <= end_ep]
+        else:
+            min_episode = int(recs_sorted[-1].total_episodes * (1.0 - late_fraction))
+            late_recs = [r for r in recs_sorted if r.episode_index >= min_episode]
+            pool = late_recs if late_recs else recs_sorted
         pool = list(pool)
         rng.shuffle(pool)
         prepared[run_dir] = pool

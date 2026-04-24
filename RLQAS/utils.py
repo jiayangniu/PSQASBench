@@ -15,15 +15,32 @@ from qulacs import Observable
 
 # ── Seed ─────────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int):
+def _resolve_torch_device(device: torch.device | str | None) -> torch.device | None:
+    if device is None:
+        return None
+    return device if isinstance(device, torch.device) else torch.device(device)
+
+
+def set_torch_seed(seed: int, device: torch.device | str | None = None):
+    # Seed the default CPU generator without touching CUDA device 0.
+    cpu_generator = torch.Generator()
+    cpu_generator.manual_seed(seed)
+    torch.set_rng_state(cpu_generator.get_state())
+
+    target_device = _resolve_torch_device(device)
+    if target_device is None or target_device.type != "cuda" or not torch.cuda.is_available():
+        return
+
+    torch.cuda.set_device(target_device)
+    torch.cuda.manual_seed(seed)
+
+
+def set_seed(seed: int, device: torch.device | str | None = None):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    if torch.cuda.device_count() > 0:
-        torch.cuda.manual_seed_all(seed)
+    set_torch_seed(seed, device=device)
 
 
 # ── Action dictionaries ───────────────────────────────────────────────────────
@@ -115,6 +132,7 @@ def get_config(cfg_path: str, verbose: bool = False) -> dict:
         "shift_threshold_ball", "succes_switch", "tolearance_to_thresh",
         "memory_reset_threshold", "fake_min_energy", "_true_en",
         "n_shots", "err_mitig", "rand_halt",
+        "analysis_save_threshold",
         "a", "gamma", "c", "lamda", "beta_1", "beta_2",
         "refine_dropout", "delta_max", "refine_entropy_coef",
         "maxfev", "maxfev1", "maxfev2", "maxfev3",
@@ -128,7 +146,7 @@ def get_config(cfg_path: str, verbose: bool = False) -> dict:
     _LISTS = {
         "episodes", "neurons", "accept_err", "epsilon_decay", "epsilon_min",
         "final_gamma", "memory_clean", "update_target_net", "epsilon_restart",
-        "thresholds", "switch_episodes", "refine_neurons",
+        "thresholds", "switch_episodes", "refine_neurons", "qubit_importance",
     }
 
     config_dict = {}

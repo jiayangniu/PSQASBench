@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,14 +112,44 @@ class ResultLogger:
         self.best_eval_path = self.result_dir / "best_eval.txt"
 
         self.result_dir.mkdir(parents=True, exist_ok=True)
+        self._acquire_lock()
         self._copy_config()
         self._init_text_files()
         self.write_run_meta(status="running")
+
+    def _acquire_lock(self) -> None:
+        lock_path = self.result_dir / "run.lock"
+        if lock_path.exists():
+            try:
+                existing_pid = int(lock_path.read_text(encoding="utf-8").strip())
+                os.kill(existing_pid, 0)  # raises OSError if process is dead
+                raise RuntimeError(
+                    f"Result directory is already in use by PID {existing_pid}: {self.result_dir}\n"
+                    f"If that process is no longer running, delete {lock_path} and retry."
+                )
+            except (ValueError, OSError):
+                # Stale lock — process is dead, safe to overwrite
+                pass
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
+
+    def release_lock(self) -> None:
+        lock_path = self.result_dir / "run.lock"
+        lock_path.unlink(missing_ok=True)
 
     def _copy_config(self):
         shutil.copyfile(self.config_path, self.result_dir / "config_used.cfg")
 
     def _init_text_files(self):
+        # Explicitly unlink before write to guarantee a clean file even when
+        # re-running into an existing result directory (e.g. after a crash).
+        for path in [
+            self.episode_traces_path,
+            self.episode_summary_path,
+            self.policy_loss_path,
+            self.best_train_path,
+            self.best_eval_path,
+        ]:
+            path.unlink(missing_ok=True)
         self.episode_summary_path.write_text(
             "\t".join(self.EPISODE_SUMMARY_FIELDS) + "\n",
             encoding="utf-8",
@@ -168,6 +199,7 @@ class ResultLogger:
         if final_result:
             final_fields.update(final_result)
         self.write_run_meta(status="completed", final_result=final_fields)
+        self.release_lock()
 
     def append_episode_summary(self, record: dict):
         row = [_fmt_scalar(record.get(field)) for field in self.EPISODE_SUMMARY_FIELDS]

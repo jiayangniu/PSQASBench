@@ -11,7 +11,7 @@ import torch
 import wandb
 
 from .result_logger import ResultLogger
-from .utils import count_rotation_gates, get_config, set_seed
+from .utils import count_rotation_gates, get_config, set_seed, set_torch_seed
 from .hy_environment import HyCircuitEnv
 from .agents.Hybrid_REINFORCE import HybridActionPolicy
 from .agents.Hybrid_REINFORCE_RENEW import HybridActionPolicywithRefine
@@ -104,6 +104,12 @@ class HyRLQASRunner(BaseRunner):
         torch.save(agent.optim.state_dict(), self.result_dir / f"{tag}_optim.pth")
 
     def _mol_key(self) -> str:
+        parts = self.result_dir.parts
+        if "results" in parts:
+            idx = parts.index("results")
+            rel = parts[idx + 1 :]
+            if len(rel) >= 3:
+                return rel[1]
         return self.result_dir.parents[1].name
 
     def _init_artifacts(self):
@@ -260,7 +266,7 @@ class HyRLQASRunner(BaseRunner):
         is_renew   = self._is_renew()
 
         np.random.seed(seed)
-        torch.manual_seed(seed)
+        set_torch_seed(seed, device=self.device)
 
         agent.HybridAction_policy_net.eval()
         if is_renew:
@@ -904,7 +910,7 @@ class HyRLQASRunner(BaseRunner):
     # ── public interface ──────────────────────────────────────────────────────
 
     def run(self) -> dict:
-        set_seed(self.seed)
+        set_seed(self.seed, device=self.device)
         torch.set_num_threads(1)
         run_start = time.perf_counter()
         self._init_artifacts()

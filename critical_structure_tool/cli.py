@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .circuit_utils import prefix_to_gates
+from .circuit_utils import gate_dicts_to_gates, prefix_to_gates
 from .io_utils import (
     REPO_ROOT,
     choose_bucket_interactive,
@@ -80,6 +80,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0 / 3.0,
         help="Prefer episodes from the last fraction of training within each run. Default: 1/3.",
+    )
+    parser.add_argument(
+        "--episode-range",
+        type=int,
+        nargs=2,
+        metavar=("START", "END"),
+        default=None,
+        help=(
+            "Explicit inclusive episode-index range [START, END] used for representative "
+            "episode sampling. If set, overrides --late-fraction."
+        ),
     )
     parser.add_argument(
         "--anchor-top-k",
@@ -255,6 +266,8 @@ def _compact_molecule_token(name: str) -> str:
 
 def _config_suffix_token(config_name: str, molecule_name: str) -> str:
     config = str(config_name)
+    if config == str(molecule_name):
+        return "default"
     prefix = f"{molecule_name}_"
     if config.startswith(prefix):
         config = config[len(prefix):]
@@ -285,9 +298,6 @@ def auto_out_dir(
         config_token = "multi_config"
 
     parts = [
-        method_token,
-        molecule_token,
-        config_token,
         _slug(mode),
         f"w{_bucket_token(bucket_width_mha)}",
     ]
@@ -295,7 +305,14 @@ def auto_out_dir(
         parts.append(f"b{_bucket_token(chosen_bucket)}")
 
     name = "__".join(parts)
-    return (REPO_ROOT / "critical_structure_analysis" / name).resolve()
+    return (
+        REPO_ROOT
+        / "critical_structure_analysis"
+        / method_token
+        / molecule_token
+        / config_token
+        / name
+    ).resolve()
 
 
 def load_molecule(path: Path):
@@ -320,6 +337,17 @@ def format_gate_sequence(gates) -> str:
 
 def format_gate_signature_sequence(gates) -> str:
     return " | ".join(g.signature for g in gates)
+
+
+def format_gate_param_sequence(gates) -> str:
+    formatted = []
+    for gate in gates:
+        if gate.gate_type == "cnot":
+            formatted.append(gate.signature)
+        else:
+            axis_name = {1: "RX", 2: "RY", 3: "RZ"}.get(gate.axis, f"R{gate.axis}")
+            formatted.append(f"{axis_name}(q={gate.q},θ={gate.angle:+.3f})")
+    return " | ".join(formatted)
 
 
 def resolve_analysis_optimizer(requested: str, rec: SnapshotRecord) -> str:
@@ -445,6 +473,7 @@ def main() -> int:
         bucket_records,
         n_select=args.select_n,
         late_fraction=args.late_fraction,
+        episode_range=tuple(args.episode_range) if args.episode_range is not None else None,
         rng=rng,
     )
     if not selected:
@@ -465,7 +494,7 @@ def main() -> int:
                 "event_step": rec.event_step,
                 "event_error_mha": f"{rec.event_error_mha:.4f}",
                 "last_action": rec.last_action_token,
-                "prefix_len": len(rec.action_ids_prefix),
+                "prefix_len": len(rec.gates_direct) if rec.gates_direct is not None else len(rec.action_ids_prefix),
             }
         )
     write_tsv(
@@ -490,6 +519,7 @@ def main() -> int:
     mol_cache = {}
     summary_rows = []
     exact_signature_counter: Counter[tuple[str, ...]] = Counter()
+    exact_signature_angle_counter: dict[tuple[str, ...], Counter[str]] = {}
     retained_action_sets: list[set[str]] = []
     resolved_optimizers: Counter[str] = Counter()
 
@@ -502,12 +532,15 @@ def main() -> int:
         analysis_rotosolve_sweeps = resolve_rotosolve_sweeps(args, rec, analysis_optimizer)
         resolved_optimizers[analysis_optimizer] += 1
 
-        initial_gates = prefix_to_gates(
-            rec.action_ids_prefix,
-            rec.run.action_dict,
-            rec.run.num_qubits,
-            snapshot=rec.snapshot,
-        )
+        if rec.gates_direct is not None:
+            initial_gates = gate_dicts_to_gates(rec.gates_direct)
+        else:
+            initial_gates = prefix_to_gates(
+                rec.action_ids_prefix,
+                rec.run.action_dict,
+                rec.run.num_qubits,
+                snapshot=rec.snapshot,
+            )
         print(
             f"[{idx}/{len(selected)}] {episode_key(rec)} "
             f"prefix_len={len(initial_gates)} qubits={n_qubits} optimizer={analysis_optimizer} "
@@ -575,8 +608,11 @@ def main() -> int:
 
         retained_labels = [g.signature for g in best_branch.gates]
         retained_compact = format_gate_signature_sequence(best_branch.gates)
+        retained_with_angles = format_gate_param_sequence(best_branch.gates)
         retained_action_sets.append(set(retained_labels))
-        exact_signature_counter[tuple(retained_labels)] += 1
+        sig_key = tuple(retained_labels)
+        exact_signature_counter[sig_key] += 1
+        exact_signature_angle_counter.setdefault(sig_key, Counter())[retained_with_angles] += 1
         original_gate_count = len(baseline_gates)
         retained_gate_count = len(best_branch.gates)
         removed_gate_count = original_gate_count - retained_gate_count
@@ -605,6 +641,7 @@ def main() -> int:
                 "resolved_optimizer": analysis_optimizer,
                 "last_action": rec.last_action_token,
                 "retained_gates": retained_compact,
+                "retained_gates_with_angles": retained_with_angles,
                 "retained_signature": json.dumps(retained_labels, ensure_ascii=True),
             }
         )
@@ -631,6 +668,7 @@ def main() -> int:
             "resolved_optimizer",
             "last_action",
             "retained_gates",
+            "retained_gates_with_angles",
             "retained_signature",
         ],
         summary_rows,
@@ -638,14 +676,41 @@ def main() -> int:
 
     exact_rows = []
     for rank, (sig, count) in enumerate(exact_signature_counter.most_common(), 1):
+        angle_counter = exact_signature_angle_counter.get(sig, Counter())
+        angle_variants = [
+            {
+                "count": variant_count,
+                "retained_gates_with_angles": variant,
+            }
+            for variant, variant_count in angle_counter.most_common()
+        ]
+        angle_variants_summary = " || ".join(
+            f"count={variant['count']}: {variant['retained_gates_with_angles']}"
+            for variant in angle_variants
+        )
         exact_rows.append(
             {
                 "rank": rank,
                 "count": count,
                 "retained_gates": " | ".join(sig),
+                "retained_gates_with_angles_variants": angle_variants_summary,
+                "angle_variants": angle_variants,
             }
         )
-    write_tsv(out_dir / "exact_signature_counts.tsv", ["rank", "count", "retained_gates"], exact_rows)
+    exact_rows_for_tsv = [
+        {
+            "rank": row["rank"],
+            "count": row["count"],
+            "retained_gates": row["retained_gates"],
+            "retained_gates_with_angles_variants": row["retained_gates_with_angles_variants"],
+        }
+        for row in exact_rows
+    ]
+    write_tsv(
+        out_dir / "exact_signature_counts.tsv",
+        ["rank", "count", "retained_gates", "retained_gates_with_angles_variants"],
+        exact_rows_for_tsv,
+    )
 
     common_gate_signatures = []
     if retained_action_sets:
@@ -659,6 +724,7 @@ def main() -> int:
         f"discovered_runs = {len(run_dirs)}",
         f"snapshot_events_in_bucket = {len(bucket_records)}",
         f"selected_snapshot_events = {len(selected)}",
+        f"episode_range = {list(args.episode_range) if args.episode_range is not None else 'none'}",
         f"late_fraction = {args.late_fraction}",
         f"analysis_optimizer_request = {args.analysis_optimizer}",
         f"rotosolve_sweeps = {args.rotosolve_sweeps}",
@@ -689,7 +755,10 @@ def main() -> int:
     meta_lines += ["", "[exact_retained_structure_matches]"]
     if exact_rows:
         for row in exact_rows[:10]:
-            meta_lines.append(f"count={row['count']} retained_gates={row['retained_gates']}")
+            for variant in row["angle_variants"]:
+                meta_lines.append(
+                    f"count={variant['count']} retained_gates={variant['retained_gates_with_angles']}"
+                )
     else:
         meta_lines.append("none")
     (out_dir / "meta.txt").write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
@@ -703,6 +772,9 @@ def main() -> int:
         f"- discovered runs: `{len(run_dirs)}`",
         f"- snapshot events in bucket: `{len(bucket_records)}`",
         f"- selected snapshot events for pruning: `{len(selected)}`",
+        f"- episode sampling: `range [{args.episode_range[0]}, {args.episode_range[1]}]`"
+        if args.episode_range is not None
+        else f"- episode sampling: `late_fraction = {args.late_fraction}`",
         "",
         "**Anchor Actions**",
         "",
@@ -714,8 +786,8 @@ def main() -> int:
         "",
         "**Per-Snapshot Pruning Summary**",
         "",
-        "| Snapshot | Baseline (mHa) | Retained (mHa) | Δerror (mHa) | Original | Fixed | Max Steps | Retained | Removed | Redundancy | Optimizer | Retained Gates |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| Snapshot | Baseline (mHa) | Retained (mHa) | Δerror (mHa) | Original | Fixed | Max Steps | Retained | Removed | Redundancy | Optimizer |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in summary_rows:
         report_lines.append(
@@ -723,7 +795,7 @@ def main() -> int:
             f"{row['retained_error_mha']} | {row['delta_error_mha']} | "
             f"{row['original_gate_count']} | {row['fixed_gate_count']} | {row['effective_max_prune_steps']} | "
             f"{row['retained_gate_count']} | {row['removed_gate_count']} | {row['redundancy_ratio_pct']}% | "
-            f"{row['resolved_optimizer']} | `{row['retained_gates']}` |"
+            f"{row['resolved_optimizer']} |"
         )
 
     report_lines += [
@@ -733,9 +805,10 @@ def main() -> int:
     ]
     if exact_rows:
         for row in exact_rows[:10]:
-            report_lines.append(
-                f"- count={row['count']}: `{row['retained_gates']}`"
-            )
+            for variant in row["angle_variants"]:
+                report_lines.append(
+                    f"- count={variant['count']}: `{variant['retained_gates_with_angles']}`"
+                )
     else:
         report_lines.append("- none")
 

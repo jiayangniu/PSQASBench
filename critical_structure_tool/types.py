@@ -38,6 +38,7 @@ class SnapshotRecord:
     last_action_id: int
     last_action_token: str
     snapshot: dict[str, Any] = field(default_factory=dict)
+    gates_direct: list[dict] | None = field(default=None)
 
 
 @dataclass

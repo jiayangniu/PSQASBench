@@ -62,6 +62,22 @@ class DQN:
             "Transition", ("state", "action", "reward", "next_state", "done")
         )
 
+        # Optional importance-weighted exploration (activated by qubit_importance in config).
+        imp_raw = conf["agent"].get("qubit_importance")
+        if imp_raw is not None:
+            imp = np.array(imp_raw, dtype=float)
+            N   = self.num_qubits
+            w   = np.empty(action_size)
+            for idx, v in self.translate.items():
+                if v[0] < N:   # CNOT: [ctrl, offset, N, 0]
+                    targ  = (v[0] + v[1]) % N
+                    w[idx] = (imp[v[0]] + imp[targ]) / 2.0
+                else:           # Rotation: [N, 0, rot_qubit, rot_axis]
+                    w[idx] = imp[v[2]]
+            self.explore_weights = (w / w.sum()).astype(np.float64)
+        else:
+            self.explore_weights = None
+
     def _build_network(self, neurons, p):
         layers = []
         sizes  = [self.state_size] + neurons
@@ -73,12 +89,21 @@ class DQN:
     def remember(self, state, action, reward, next_state, done):
         self.memory.push(state, action, reward, next_state, done)
 
+    def _explore(self, ill_actions) -> int:
+        """Sample a random legal action, optionally weighted by qubit importance."""
+        if self.explore_weights is not None:
+            ill_set = set(ill_actions)
+            legal   = [a for a in range(self.action_size) if a not in ill_set]
+            w       = self.explore_weights[legal]
+            return int(np.random.choice(legal, p=w / w.sum()))
+        a = torch.randint(self.action_size, (1,)).item()
+        while a in ill_actions:
+            a = torch.randint(self.action_size, (1,)).item()
+        return a
+
     def act(self, state, ill_actions):
         if torch.rand(1).item() <= self.epsilon:
-            a = torch.randint(self.action_size, (1,)).item()
-            while a in ill_actions:
-                a = torch.randint(self.action_size, (1,)).item()
-            return a, True
+            return self._explore(ill_actions), True
         q = self.policy_net(state.unsqueeze(0))
         q[0][list(ill_actions)] = float("-inf")
         return torch.argmax(q[0]).item(), False
@@ -101,10 +126,7 @@ class DQN:
         results = []
         for k in range(K):
             if torch.rand(1).item() <= self.epsilon:
-                a = torch.randint(self.action_size, (1,)).item()
-                while a in ill_actions_list[k]:
-                    a = torch.randint(self.action_size, (1,)).item()
-                results.append((a, True))
+                results.append((self._explore(ill_actions_list[k]), True))
             else:
                 q = q_batch[k].clone()
                 q[list(ill_actions_list[k])] = float("-inf")

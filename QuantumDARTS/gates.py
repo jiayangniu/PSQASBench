@@ -4,7 +4,9 @@ gates.py — Efficient quantum gate application for QuantumDARTS.
 Uses state-vector propagation (O(2^n) per gate) rather than full unitary
 matrix products (O(4^n)) for efficiency.
 
-Qubit ordering convention: qubit 0 = MSB (leftmost in ket notation).
+Qubit ordering convention: qubit 0 = LSB (bit position 0 in the integer index).
+This matches Qulacs and BatchedVQE so that the DARTS search energy evaluates
+the same Hamiltonian convention as the fixed-circuit optimisation step.
 """
 
 import torch
@@ -55,6 +57,9 @@ def apply_1q(psi: torch.Tensor, gate: torch.Tensor,
     """
     Apply a (2,2) complex gate to `qubit` of a 2^n state vector.
 
+    LSB convention: qubit q occupies bit position q, so it maps to
+    axis (n_qubits - 1 - q) in the rank-n reshaped tensor.
+
     Algorithm:
       1. Reshape psi → (2, 2, …, 2)  [n_qubits axes]
       2. Permute so qubit axis is first
@@ -62,7 +67,8 @@ def apply_1q(psi: torch.Tensor, gate: torch.Tensor,
       4. Invert permutation, reshape to (2^n,)
     """
     psi_r = psi.reshape([2] * n_qubits)
-    axes = [qubit] + [q for q in range(n_qubits) if q != qubit]
+    axis = n_qubits - 1 - qubit
+    axes = [axis] + [a for a in range(n_qubits) if a != axis]
     psi_p = psi_r.permute(axes)
     d_rest = 2 ** (n_qubits - 1)
     psi_new = (gate @ psi_p.reshape(2, d_rest)).reshape(psi_p.shape)
@@ -77,12 +83,13 @@ def apply_cnot(psi: torch.Tensor, control: int, target: int,
     """
     Apply CNOT (control, target) to state vector via index gather.
     O(2^n), differentiable via gather.
+
+    LSB convention: qubit q = bit position q in the integer index.
     """
     dim = psi.shape[0]
     idx = torch.arange(dim, device=psi.device)
-    ctrl_bit = (idx >> (n_qubits - 1 - control)) & 1
-    tgt_pos = n_qubits - 1 - target
-    flipped = torch.where(ctrl_bit.bool(), idx ^ (1 << tgt_pos), idx)
+    ctrl_bit = (idx >> control) & 1
+    flipped = torch.where(ctrl_bit.bool(), idx ^ (1 << target), idx)
     return psi[flipped]
 
 

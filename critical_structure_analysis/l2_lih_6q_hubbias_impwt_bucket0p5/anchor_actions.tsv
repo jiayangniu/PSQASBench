@@ -1,0 +1,13 @@
+rank	action	count
+1	CNOT(5->4)	2
+2	CNOT(5->0)	2
+3	RX(q=4)	1
+4	CNOT(2->0)	1
+5	RX(q=1)	1
+6	RZ(q=2)	1
+7	RZ(q=5)	1
+8	CNOT(3->1)	1
+9	CNOT(3->5)	1
+10	CNOT(0->5)	1
+11	RY(q=2)	1
+12	CNOT(0->2)	1

@@ -341,13 +341,24 @@ When `num_parallel_envs > 1`, the runner uses one CUDA stream per environment an
 
 ## Result Artifacts
 
-Each run writes the following files under `results/<method>/<mol>/<config>/seed<seed>/`:
+Runs write their outputs under:
+
+```text
+results/<method>/<mol>/<config>/seed<seed>/
+```
+
+For RLQAS methods (`crlqas`, `hyrlqas`), the full training trace is written.  `TFQAS`
+and `QuantumDARTS` also now write compatibility files for post-hoc structure analysis,
+but their trace semantics are different: they serialize candidate/final circuits as
+pseudo-episodes rather than logging an RL training trajectory.
+
+Common files you will typically find are:
 
 | File | Contents |
 |------|----------|
 | `run_meta.txt` | Method, mol, seed, device, exact energy, wall-clock time, final result |
 | `episode_summary.tsv` | Per-episode energy, depth, CNOT count, reward, ε |
-| `episode_traces.txt` | Per-step action / energy / reward sequences, `first_hit_snapshot` |
+| `episode_traces.txt` | RL traces or compatibility pseudo-traces; may contain `analysis_snapshots` and/or `gates_direct` |
 | `policy_loss.tsv` | Policy gradient / DQN loss per update |
 | `best_train.txt` | Circuit achieving the lowest training energy |
 | `best_eval.txt` | Best eval checkpoint (SR, CNOT@chem, D\_struct, D\_func) + full eval trend |
@@ -357,7 +368,7 @@ Each run writes the following files under `results/<method>/<mol>/<config>/seed<
 
 ### `episode_traces.txt` format
 
-Each episode block has the following fields:
+For RLQAS methods, each episode block may contain fields such as:
 
 ```
 [episode N]
@@ -365,10 +376,25 @@ actions = [...]
 energies_ha = [...]
 energy_errors_ha = [...]
 rewards = [...]
-first_hit_snapshot = {"step": S, "gate_params": [...], "param_step_indices": [...]}
+analysis_snapshots = [
+  {"step": S, "gate_params": [...], "param_step_indices": [...]},
+  ...
+]
 ```
 
-`first_hit_snapshot` is written for every episode.  For episodes that never crossed the threshold it is `{}`.  For successful episodes it stores the optimised rotation angles at the exact step where `energy_error <= done_threshold`, enabling warm-start reconstruction in post-hoc analysis.
+`analysis_snapshots` stores one or more threshold-crossing events.  Each snapshot records the
+gate parameters needed for warm-start reconstruction in post-hoc analysis.
+
+For `TFQAS` and `QuantumDARTS`, `episode_traces.txt` is written in a compatibility form:
+
+```
+[episode N]
+energy_errors_ha = [...]
+analysis_snapshots = [{"step": 0, "gates_direct": [...]}]
+```
+
+Here `gates_direct` is a direct gate list, so `critical_structure_tool` can reconstruct the
+circuit without an RL action dictionary.
 
 ---
 
@@ -384,21 +410,26 @@ It addresses the **puzzle-piece phenomenon** observed in RLQAS training traces: 
 
 ### Scope and prerequisites
 
-The tool currently works only with **RLQAS methods** (CRLQAS, HyRLQAS, RENEW) that produce standard PSQASBench result directories.  Required files per run directory:
+The tool works with:
+
+- **RLQAS methods** (`crlqas`, `hyrlqas`, `renew`) using action-based traces
+- **direct-gate snapshot methods** (`TFQAS`, `QuantumDARTS`) that export compatibility traces with `gates_direct`
+
+Required files per run directory:
 
 | File | Required | Used for |
 |------|---------|---------|
-| `episode_traces.txt` | **yes** | action sequences, error traces, warm-start snapshots |
-| `config_used.cfg` | **yes** | action-id → gate decoding, optimizer inheritance |
-| `run_meta.txt` | optional | fallback `accept_err` when `--target-error-mha` is not specified |
+| `episode_traces.txt` | **yes** | RL action traces or direct-gate snapshot events |
+| `config_used.cfg` | **yes** | action-id → gate decoding, molecule lookup, optimizer inheritance |
+| `run_meta.txt` | optional | fallback `accept_err` / `analysis_save_threshold` when `--target-error-mha` is not specified |
 
-QuantumDARTS and TFQAS do not produce `episode_traces.txt` in the RLQAS format and are therefore not currently supported by this tool.
+For `TFQAS` and `QuantumDARTS`, the tool analyzes serialized candidate/final circuits rather than an RL trajectory.  These runs are therefore supported for structural pruning, but `episode` index should be interpreted as a method-specific candidate ordering rather than training time.
 
 ### Warm-start reconstruction
 
-When `episode_traces.txt` contains a non-empty `first_hit_snapshot` (produced by runs after the snapshot-logging change), the tool uses the saved optimised angles as the starting point for circuit reconstruction.  This substantially improves reconstruction fidelity for near-degenerate systems (L3) where cold-start re-optimisation from angle=0 typically falls into a different basin.
+When `episode_traces.txt` contains parameterized `analysis_snapshots` (produced by runs after the snapshot-logging change), the tool uses the saved optimised angles as the starting point for circuit reconstruction.  This substantially improves reconstruction fidelity for near-degenerate systems (L3) where cold-start re-optimisation from angle=0 typically falls into a different basin.
 
-For **old result files** without `first_hit_snapshot`, the tool falls back silently to cold-start reconstruction (all angles initialised to 0).
+For **old result files** without `analysis_snapshots`, the tool falls back to legacy `first_hit_snapshot` if present, and otherwise to cold-start reconstruction (all angles initialised to 0).
 
 ### Usage
 
@@ -447,11 +478,11 @@ Equivalent module entrypoint: `python -m critical_structure_tool <args...>`
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--target-error-mha` | inherit from `run_meta.txt` | threshold defining the first-hit event |
-| `--bucket` | interactive prompt | first-hit error bucket to analyse (mHa, 2 decimal places) |
-| `--select-n` | 6 | number of representative episodes to prune |
-| `--late-fraction` | 1/3 | sample episodes from the last fraction of training |
-| `--anchor-top-k` | 3 | most frequent hit-time last actions treated as protected anchors |
+| `--target-error-mha` | inherit from `run_meta.txt` | threshold used to filter saved snapshot events |
+| `--bucket` | interactive prompt | snapshot-event error bucket to analyse |
+| `--select-n` | 6 | number of representative snapshot events to prune |
+| `--late-fraction` | 1/3 | sample from the last fraction of episode indices; for TFQAS/QuantumDARTS this is candidate-order, not RL time |
+| `--anchor-top-k` | 3 | most frequent event-time last actions treated as protected anchors |
 
 **Error tolerances**
 
@@ -485,13 +516,13 @@ All outputs are written under `--out-dir` (default: `critical_structure_analysis
 
 | File | Contents |
 |------|----------|
-| `first_hit_error_distribution.tsv` | Fine-grained distribution of first-hit errors across all discovered episodes |
-| `bucket_summary.tsv` | Coarser bucket view (rounded to 2 decimal places) with counts and mean hit step |
-| `anchor_actions.tsv` | Most frequent hit-time last actions for the chosen bucket |
-| `selected_episodes.tsv` | Episodes selected for pruning (episode key, seed, first-hit step, last action) |
-| `summary.tsv` | Per-episode pruning results: baseline error, retained error, gate counts, redundancy |
+| `first_hit_error_distribution.tsv` | Fine-grained distribution of saved snapshot-event errors |
+| `bucket_summary.tsv` | Coarser bucket view with counts and mean event step |
+| `anchor_actions.tsv` | Most frequent event-time last actions for the chosen bucket |
+| `selected_episodes.tsv` | Snapshot events selected for pruning (episode key, seed, step, last action) |
+| `summary.tsv` | Per-snapshot pruning results: baseline error, retained error, gate counts, redundancy |
 | `summary.md` | Human-readable markdown table of pruning results |
-| `exact_signature_counts.tsv` | Exact retained gate-sequence matches across episodes |
+| `exact_signature_counts.tsv` | Exact retained gate-sequence matches across snapshot events |
 | `meta.txt` | Full run metadata (parameters, anchor actions, common retained gates) |
 
 ### Interpreting results
@@ -502,32 +533,34 @@ All outputs are written under `--out-dir` (default: `critical_structure_analysis
 
 **Common retained gate signatures** — gates present in all pruned episodes (exact set intersection).  `none` does not mean no pattern exists; it often indicates consistent qubit-level patterns that the exact-match test misses (use the individual `summary.md` to inspect manually).
 
-**Reconstruction baseline >> target error** — indicates warm-start failure (cold-start landed in wrong basin).  Increase `--reconstruction-slack-mha`, check that `first_hit_snapshot` is present in traces, or treat that episode as unusable.  This is expected for L3 near-degenerate molecules with old result files.
+**Reconstruction baseline >> target error** — indicates warm-start failure (cold-start landed in wrong basin).  Increase `--reconstruction-slack-mha`, check that `analysis_snapshots` or legacy `first_hit_snapshot` is present in traces, or treat that episode as unusable.  This is expected for L3 near-degenerate molecules with old result files.
 
 ---
 
 ## Pipeline Overview
 
 ```text
-Training run (CRLQAS / HyRLQAS / RENEW)
+Training run (CRLQAS / HyRLQAS / RENEW / TFQAS / QuantumDARTS)
     │
     ├── results/<method>/<mol>/<config>/seed<seed>/
     │   ├── episode_traces.txt     ← main input for analysis
     │   ├── config_used.cfg        ← gate decoding + optimizer info
-    │   └── run_meta.txt           ← accept_err fallback
+    │   └── run_meta.txt           ← threshold fallback
     │
     └── critical_structure_tool
         │
         ├── 1. Discover runs (episode_traces.txt files)
-        ├── 2. Build first-hit distribution
-        ├── 3. Choose bucket interactively or via --bucket
-        ├── 4. Sample representative late-training episodes
-        ├── 5. Reconstruct first-hit circuit
-        │       warm-start: use first_hit_snapshot angles (new traces)
-        │       cold-start: re-optimize from angle=0 (old traces)
-        ├── 6. One-shot gate importance (delete each gate, measure |ΔE|)
-        ├── 7. Beam search pruning (fixed deletion prior, prune-budget)
-        └── 8. Compare retained structures across episodes
+        ├── 2. Expand saved snapshot events
+        ├── 3. Build event-error distribution
+        ├── 4. Choose bucket interactively or via --bucket
+        ├── 5. Sample representative snapshot events
+        ├── 6. Reconstruct circuit from actions or gates_direct
+        │       warm-start: use analysis_snapshots angles when available
+        │       legacy fallback: use first_hit_snapshot if present
+        │       cold-start: re-optimize from angle=0 if no snapshot exists
+        ├── 7. One-shot gate importance (delete each gate, measure |ΔE|)
+        ├── 8. Beam search pruning (fixed deletion prior, prune-budget)
+        └── 9. Compare retained structures across snapshot events
 ```
 
 ---
@@ -540,7 +573,7 @@ PSQASBench/
 ├── bench_utils.py                 # molecule registry, arg parsing, path constants
 │
 ├── RLQAS/                         # RL-based QAS runners (CRLQAS, HyRLQAS, RENEW)
-│   ├── base_runner.py             # abstract BaseRunner + shared periodic_eval + _capture_first_hit_snapshot
+│   ├── base_runner.py             # abstract BaseRunner + shared periodic_eval + analysis snapshot capture helpers
 │   ├── crlqas_runner.py           # CRLQAS (DQN) runner
 │   ├── hyrlqas_runner.py          # HyRLQAS / RENEW runner
 │   ├── result_logger.py           # structured artifact writer (all methods share this)
@@ -569,7 +602,7 @@ PSQASBench/
 │   ├── circuit_utils.py           # gate construction, qulacs evaluation, optimizers
 │   ├── pruning.py                 # gate importance + probabilistic beam pruning
 │   ├── io_utils.py                # trace parsing, config reading, episode record construction
-│   └── types.py                   # RunContext, EpisodeRecord, GateSpec, BranchState
+│   └── types.py                   # RunContext, SnapshotRecord, GateSpec, BranchState
 │
 ├── analyze_critical_structure.py  # thin wrapper: python analyze_critical_structure.py <dirs...>
 │
@@ -598,7 +631,7 @@ These are documented as findings; fixes are noted where planned:
 
 4. **Curriculum Threshold Sensitivity** — The initial `accept_err` and tightening schedule affect convergence significantly but are rarely ablated.  Isolated via the LevelCheck experiment group in `configs/crlqas/LevelCheck_EXP/`.
 
-5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `first_hit_snapshot` field added to `episode_traces.txt` (requires re-running experiments to populate).
+5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `analysis_snapshots` trace format (with legacy `first_hit_snapshot` fallback), which requires re-running experiments to populate for old runs.
 
 ---
 

@@ -15,6 +15,12 @@ def main():
 
     # --- validate paths before redirecting (errors go to terminal) --------------
     device = torch.device(args['device'])
+    if device.type == "cuda":
+        # set_device BEFORE is_available() to avoid CUDA initialising a
+        # default context on GPU 0 prior to the real target device being set.
+        torch.cuda.set_device(device)
+        if not torch.cuda.is_available():
+            sys.exit(f"[ERROR] CUDA device requested but CUDA is unavailable: {device}")
 
     mol_path = MOL_DIR / MOL_FILES[args['mol']]
     if not mol_path.exists():

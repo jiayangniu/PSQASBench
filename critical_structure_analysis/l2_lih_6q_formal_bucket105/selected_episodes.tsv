@@ -1,2 +1,0 @@
-episode_key	run_dir	method	molecule	config	seed	episode	first_hit_step	first_hit_error_mha	last_action	prefix_len
-crlqas__L2_LiH_Equil_6q__L2_LiH_Equil_6q_cobyla_20k__seed11111__ep1462	/home/ubuntu/NeurIPS2026/PSQASBench/results/crlqas/L2_LiH_Equil_6q/Formal_EXP/L2_LiH_Equil_6q_cobyla_20k/seed11111	crlqas	L2_LiH_Equil_6q	L2_LiH_Equil_6q_cobyla_20k	seed11111	1462	17	0.2568	RY(q=1)	17

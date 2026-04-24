@@ -1,6 +1,6 @@
 # Critical Structure Tool
 
-This tool is used to analyze which circuit structure is most likely responsible for a successful RLQAS snapshot event.
+This tool is used to analyze which circuit structure is most likely responsible for a successful snapshot event.
 
 Instead of inspecting only one `best` circuit, it:
 
@@ -14,6 +14,11 @@ The main question it tries to answer is:
 
 > For a given performance regime, what structure did the method repeatedly learn?
 
+It currently supports two trace styles:
+
+- **RL action traces** from `crlqas`, `hyrlqas`, and similar RLQAS methods
+- **direct-gate snapshot traces** from methods such as `TFQAS` and `QuantumDARTS`
+
 ## What This Tool Uses
 
 The tool currently reads:
@@ -25,11 +30,15 @@ The tool currently reads:
 Role of each file:
 
 - `episode_traces.txt`
-  Main input. Used to read action sequences, per-step error traces, and saved `analysis_snapshots`.
+  Main input. Used to read action sequences or direct-gate snapshots, per-step error traces, and saved `analysis_snapshots`.
 - `config_used.cfg`
   Still needed to reconstruct action ids into gates and to inherit the training optimizer setup.
 - `run_meta.txt`
   Used to read the saved analysis threshold and, for old runs, as a fallback when `--target-error-mha` is not provided.
+
+For `TFQAS`, `episode_traces.txt` is a compatibility trace where each pseudo-episode contains one direct-gate snapshot event and `episode` index is a candidate ordering rather than training time.
+
+For `QuantumDARTS`, `episode_traces.txt` is a real training-time trace. Each eval checkpoint writes `trace_sample_count` circuits, and the `step` field equals the training epoch (`eval_episode`). This means `--late-fraction` selects circuits from late training, consistent with RLQAS semantics.
 
 ## Basic Usage
 
@@ -148,11 +157,15 @@ Only the most important knobs are listed here.
 ### Episode sampling
 
 - `--select-n`
-  Number of episodes to prune.
+  Number of snapshot events to prune.
 
 - `--late-fraction`
-  Episodes are sampled from the last fraction of training.
+  Snapshot events are sampled from the last fraction of episode indices.
   Current default is the last `1/3`.
+
+  For RLQAS methods, this approximates late training.
+  For `TFQAS`, this is only a sampling convention over serialized pseudo-episodes.
+  For `QuantumDARTS`, late episodes correspond to late training checkpoints.
 
 ### Anchor actions
 
@@ -258,7 +271,7 @@ For each run:
 
 - read traces from `episode_traces.txt`,
 - read gate decoding and optimizer info from `config_used.cfg`,
-- optionally read `accept_err` from `run_meta.txt` if no explicit target threshold was given.
+- optionally read threshold fallback info from `run_meta.txt` if no explicit target threshold was given.
 
 ### 3. Read analysis snapshot events
 
@@ -272,9 +285,17 @@ Each snapshot stores the minimum information needed to warm-start reconstruction
 - the optimized rotation parameters at that step,
 - and which action-prefix steps those parameters belong to.
 
+For direct-gate methods, a snapshot may instead contain:
+
+- `gates_direct = [...]`
+
+In that case the circuit is reconstructed directly from the serialized gate list rather than from an RL action prefix.
+
 If a run uses the older trace format, the tool falls back to the legacy single-event:
 
 - `first_hit_snapshot`
+
+If neither is present, it falls back once more to legacy cold-start first-hit reconstruction from the action/error trace.
 
 ### 4. Build the event-error distribution
 
@@ -282,7 +303,7 @@ For every saved snapshot event, the tool records:
 
 - the event step,
 - the event error,
-- the action prefix up to that point,
+- the action prefix up to that point, or the direct gate list,
 - the last action at the saved event.
 
 It then writes `first_hit_error_distribution.tsv` so the user can inspect the error landscape before choosing what regime to analyze.
@@ -303,14 +324,22 @@ Conceptually, this bucket is meant to represent:
 
 ### 6. Sample representative snapshot events
 
-Snapshot events are sampled from the last `late_fraction` part of training.
-Within that late pool, the tool samples rather than always taking the final few episodes.
+Snapshot events are sampled either:
+
+- from the last `late_fraction` part of episode indices, or
+- from an explicit inclusive episode range via `--episode-range START END`
+
+Within the chosen pool, the tool samples rather than always taking the final few episodes.
 
 This is meant to bias the analysis toward learned late-stage behavior while avoiding overfitting to only the very last episodes.
+
+For `TFQAS`, this should not be read as literal late training; it is simply a stable default sampling rule over serialized pseudo-episodes.
+For `QuantumDARTS`, this correctly selects circuits from late training checkpoints.
 
 ### 7. Reconstruct the saved-event circuit
 
 The tool reconstructs the circuit from the saved action prefix and hydrates the rotation gates with the saved snapshot parameters.
+If a snapshot contains `gates_direct`, the tool reconstructs directly from those gates.
 This is more faithful than cold-start reconstruction from zero angles.
 
 ### 8. Re-optimize the reconstructed circuit

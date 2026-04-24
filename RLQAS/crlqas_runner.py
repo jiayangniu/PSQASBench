@@ -11,7 +11,7 @@ import torch
 import wandb
 
 from .result_logger import ResultLogger
-from .utils import count_rotation_gates, get_config, set_seed
+from .utils import count_rotation_gates, get_config, set_seed, set_torch_seed
 from .environment import CircuitEnv
 from . import VQE as vc
 from . import agents as bench_agents
@@ -122,6 +122,12 @@ class CRLQASRunner(BaseRunner):
         torch.save(agent.optim.state_dict(),       self.result_dir / f"{tag}_optim.pth")
 
     def _mol_key(self) -> str:
+        parts = self.result_dir.parts
+        if "results" in parts:
+            idx = parts.index("results")
+            rel = parts[idx + 1 :]
+            if len(rel) >= 3:
+                return rel[1]
         return self.result_dir.parents[1].name
 
     def _init_artifacts(self):
@@ -266,7 +272,7 @@ class CRLQASRunner(BaseRunner):
 
         # seed both numpy and torch for reproducible but varied rollouts
         np.random.seed(seed)
-        torch.manual_seed(seed)
+        set_torch_seed(seed, device=self.device)
 
         agent.policy_net.eval()   # disable dropout; randomness comes from ε only
 
@@ -649,9 +655,14 @@ class CRLQASRunner(BaseRunner):
             # greedy action → duplicate experience.  One random gate breaks it.
             for k in range(K):
                 if just_reset[k]:
-                    a = torch.randint(agent.action_size, (1,)).item()
-                    while a in ill_list[k]:
+                    # Preserve any configured exploration bias (for example
+                    # qubit-importance weighting) on the forced-random first step.
+                    if hasattr(agent, "_explore"):
+                        a = agent._explore(ill_list[k])
+                    else:
                         a = torch.randint(agent.action_size, (1,)).item()
+                        while a in ill_list[k]:
+                            a = torch.randint(agent.action_size, (1,)).item()
                     act_results[k] = (a, True)
                     just_reset[k] = False
                 ep_traces[k]["actions"].append(int(act_results[k][0]))
@@ -840,7 +851,7 @@ class CRLQASRunner(BaseRunner):
     # ── public interface ──────────────────────────────────────────────────────
 
     def run(self) -> dict:
-        set_seed(self.seed)
+        set_seed(self.seed, device=self.device)
         torch.set_num_threads(1)
         run_start = time.perf_counter()
         self._init_artifacts()

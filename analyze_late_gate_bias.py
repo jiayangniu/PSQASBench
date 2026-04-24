@@ -159,16 +159,20 @@ def plot_heatmap(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig_w = max(6.0, 0.9 * len(xlabels))
-    fig_h = max(2.6, 0.9 * len(ylabels))
+    fig_h = max(3.2, 0.9 * len(ylabels))
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     im = ax.imshow(matrix, cmap=cmap, aspect="auto")
     ax.set_xticks(range(len(xlabels)))
-    ax.set_xticklabels(xlabels, rotation=45, ha="right")
+    ax.set_xticklabels(xlabels, rotation=0)
     ax.set_yticks(range(len(ylabels)))
     ax.set_yticklabels(ylabels)
-    ax.set_title(title)
+    ax.set_title(title, pad=14, fontsize=14, fontweight="semibold")
+    ax.set_xlabel("Target qubit", labelpad=10)
+    ax.set_ylabel("Source qubit", labelpad=10)
     cbar = fig.colorbar(im, ax=ax)
     cbar.ax.set_ylabel("Avg count / episode", rotation=90)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
 
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
@@ -182,15 +186,71 @@ def plot_heatmap(
     plt.close(fig)
 
 
-def plot_bar_heatmap(
-    values: list[float],
-    labels: list[str],
-    title: str,
+def plot_qubit_bias_bars(
+    qubit_labels: list[str],
+    avg_gate: list[float],
+    avg_rot: list[float],
+    avg_cnot: list[float],
     path: Path,
-    cmap: str = "Blues",
 ) -> None:
-    matrix = np.array([values], dtype=float)
-    plot_heatmap(matrix, labels, ["avg"], title, path, cmap=cmap, fmt=".3f")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    x = np.arange(len(qubit_labels))
+    width = 0.56
+
+    fig, ax = plt.subplots(figsize=(8.6, 4.9))
+    colors = {
+        "rot": "#F58518",
+        "cnot": "#54A24B",
+        "total": "#1F4E79",
+    }
+
+    rot_bars = ax.bar(x, avg_rot, width=width, color=colors["rot"], label="Avg rot gate")
+    cnot_bars = ax.bar(
+        x,
+        avg_cnot,
+        width=width,
+        bottom=avg_rot,
+        color=colors["cnot"],
+        label="Avg CNOT gate",
+    )
+    total_line = ax.plot(
+        x,
+        avg_gate,
+        color=colors["total"],
+        linewidth=2.2,
+        marker="o",
+        markersize=5.5,
+        label="Avg gate",
+        zorder=5,
+    )[0]
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(qubit_labels)
+    ax.set_ylabel("Avg count / episode")
+    ax.set_xlabel("Qubit")
+    ax.set_title("Late-Training Gate Placement Bias by Qubit", pad=18, fontsize=14, fontweight="semibold")
+    ax.grid(axis="y", linestyle="--", linewidth=0.8, alpha=0.35)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend(
+        frameon=False,
+        handles=[total_line, rot_bars[0], cnot_bars[0]],
+        labels=["Avg gate", "Avg rot gate", "Avg CNOT gate"],
+        ncol=3,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        borderaxespad=0.0,
+        columnspacing=1.4,
+        handletextpad=0.5,
+    )
+
+    ymax = max(max(avg_gate), max(avg_rot), max(avg_cnot), 1e-6)
+    ax.set_ylim(0.0, ymax * 1.18)
+
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.96])
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> int:
@@ -377,6 +437,7 @@ def main() -> int:
     cnot_targ_values = [
         aggregate_counts["cnot_targ"].get(f"q{i}", 0) / selected_total for i in range(num_qubits)
     ]
+    cnot_qubit_values = [src + targ for src, targ in zip(cnot_src_values, cnot_targ_values)]
 
     cnot_matrix = np.zeros((num_qubits, num_qubits), dtype=float)
     for src in range(num_qubits):
@@ -384,33 +445,22 @@ def main() -> int:
             token = f"CNOT({src}->{targ})"
             cnot_matrix[src, targ] = aggregate_counts["edge_token"].get(token, 0) / selected_total
 
-    plot_bar_heatmap(
-        rot_qubit_values,
+    for legacy_name in [
+        "rotation_qubit_heatmap.png",
+        "qubit_touch_heatmap.png",
+        "cnot_source_heatmap.png",
+        "cnot_target_heatmap.png",
+    ]:
+        legacy_path = figure_dir / legacy_name
+        if legacy_path.exists():
+            legacy_path.unlink()
+
+    plot_qubit_bias_bars(
         qubit_labels,
-        "Late-Training Rotation Usage by Qubit",
-        figure_dir / "rotation_qubit_heatmap.png",
-        cmap="Blues",
-    )
-    plot_bar_heatmap(
         touched_qubit_values,
-        qubit_labels,
-        "Late-Training Qubit Touch Frequency",
-        figure_dir / "qubit_touch_heatmap.png",
-        cmap="Greens",
-    )
-    plot_bar_heatmap(
-        cnot_src_values,
-        qubit_labels,
-        "Late-Training CNOT Source-Qubit Usage",
-        figure_dir / "cnot_source_heatmap.png",
-        cmap="Purples",
-    )
-    plot_bar_heatmap(
-        cnot_targ_values,
-        qubit_labels,
-        "Late-Training CNOT Target-Qubit Usage",
-        figure_dir / "cnot_target_heatmap.png",
-        cmap="Oranges",
+        rot_qubit_values,
+        cnot_qubit_values,
+        figure_dir / "qubit_bias_bars.png",
     )
     plot_heatmap(
         cnot_matrix,

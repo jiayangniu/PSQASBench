@@ -162,6 +162,8 @@ class TFQASRunner(BaseRunner):
 
         npz_path = self.save_result(result)
         self._write_run_meta(t_total)
+        self._write_config_used_cfg()
+        self._write_episode_traces(results_with_vqe, self.accept_err)
         self._write_best_circuit(best)
         self._write_search_summary()
         print(f"  Saved → {npz_path.parent}")
@@ -274,24 +276,87 @@ class TFQASRunner(BaseRunner):
 
     # ── Result file writers ────────────────────────────────────────────────────
 
+    def _write_config_used_cfg(self) -> None:
+        """Write config_used.cfg required by critical_structure_tool.build_run_context()."""
+        mol_file = Path(self.mol_path).name
+        lines = [
+            "[env]",
+            f"num_qubits = {self.n_qubits}",
+            f"accept_err = {self.accept_err}",
+            "connectivity = all",
+            "",
+            "[problem]",
+            f"mol_file = {mol_file}",
+            "",
+            "[non_local_opt]",
+            "optim_alg = COBYLA",
+            f"global_iters = {self.cobyla_maxiter}",
+        ]
+        (self.result_dir / "config_used.cfg").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+    def _write_episode_traces(
+        self,
+        results_with_vqe: list,
+        analysis_save_threshold_ha: float,
+    ) -> None:
+        """Write episode_traces.txt compatible with critical_structure_tool.
+
+        Each circuit in *results_with_vqe* becomes one episode.  Episodes whose
+        VQE error is at or below *analysis_save_threshold_ha* get an
+        ``analysis_snapshot`` with ``gates_direct`` set so the tool can
+        reconstruct the circuit without an action_dict.
+        """
+        lines: list[str] = []
+        for ep_idx, result in enumerate(results_with_vqe):
+            vqe = result.vqe
+            if vqe is None:
+                continue
+            error_ha = float(vqe.error)
+            _state, op_history, _depth = self._circuit_to_state_tensor(
+                result.circuit, vqe.params
+            )
+            # op_history dicts are already compatible with gates_direct format;
+            # the extra "layer" key is ignored by gate_dicts_to_gates().
+            gates_direct = [
+                {k: (int(v) if isinstance(v, (int, np.integer)) else float(v) if isinstance(v, (float, np.floating)) else v)
+                 for k, v in op.items()}
+                for op in op_history
+            ]
+
+            lines.append(f"[episode {ep_idx}]")
+            lines.append(f"energy_errors_ha = [{error_ha!r}]")
+            if error_ha <= analysis_save_threshold_ha:
+                snapshot = {"step": 0, "gates_direct": gates_direct}
+                lines.append(f"analysis_snapshots = [{snapshot!r}]")
+            else:
+                lines.append("analysis_snapshots = []")
+            lines.append("")
+
+        (self.result_dir / "episode_traces.txt").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+
     def _write_run_meta(self, t_total: float):
         path = self.result_dir / "run_meta.txt"
         with open(path, "w") as f:
-            f.write(f"method          = TF-QAS\n")
-            f.write(f"mol_path        = {self.mol_path}\n")
-            f.write(f"seed            = {self.seed}\n")
-            f.write(f"exact_energy_ha = {self.exact_energy:.8f}\n")
-            f.write(f"accept_err_ha   = {self.accept_err:.6f}\n")
-            f.write(f"n_qubits        = {self.n_qubits}\n")
-            f.write(f"n_layers        = {self.n_layers}\n")
-            f.write(f"S               = {self.S}\n")
-            f.write(f"R               = {self.R}\n")
-            f.write(f"K               = {self.K}\n")
-            f.write(f"n_expr_samples  = {self.n_expr_samples}\n")
-            f.write(f"pipeline        = {self.pipeline}\n")
-            f.write(f"n_vqe_restarts  = {self.n_vqe_restarts}\n")
-            f.write(f"cobyla_maxiter  = {self.cobyla_maxiter}\n")
-            f.write(f"total_time_s    = {t_total:.1f}\n")
+            f.write(f"method                     = TF-QAS\n")
+            f.write(f"mol_path                   = {self.mol_path}\n")
+            f.write(f"seed                       = {self.seed}\n")
+            f.write(f"exact_energy_ha            = {self.exact_energy:.8f}\n")
+            f.write(f"accept_err_ha              = {self.accept_err:.6f}\n")
+            f.write(f"analysis_save_threshold_ha = {self.accept_err:.6f}\n")
+            f.write(f"n_qubits                   = {self.n_qubits}\n")
+            f.write(f"n_layers                   = {self.n_layers}\n")
+            f.write(f"S                          = {self.S}\n")
+            f.write(f"R                          = {self.R}\n")
+            f.write(f"K                          = {self.K}\n")
+            f.write(f"n_expr_samples             = {self.n_expr_samples}\n")
+            f.write(f"pipeline                   = {self.pipeline}\n")
+            f.write(f"n_vqe_restarts             = {self.n_vqe_restarts}\n")
+            f.write(f"cobyla_maxiter             = {self.cobyla_maxiter}\n")
+            f.write(f"total_time_s               = {t_total:.1f}\n")
 
     def _write_best_circuit(self, best_result):
         path = self.result_dir / "best_circuit.txt"
