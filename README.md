@@ -1,6 +1,6 @@
 # PSQASBench
 
-**Pauli String Quantum Architecture Search Benchmark** — NeurIPS 2026 submission.
+**Pauli String Quantum Architecture Search Benchmark**
 
 A unified benchmarking framework for Reinforcement Learning–based Quantum Architecture Search (QAS).
 PSQASBench exposes systematic flaws in existing RL-for-QAS methods through a standardised 6-tier molecular test suite, unified evaluation metrics, and reproducible experimental protocols.
@@ -83,23 +83,18 @@ d(ψᵢ, ψⱼ) = 1 − |⟨ψᵢ|ψⱼ⟩|²
 
 ### RL Methods
 
-| Method | RL Algorithm | Action Space | Status |
-|--------|-------------|--------------|--------|
-| CRLQAS | DQN (off-policy) | Discrete | ✅ Ready |
-| HyRLQAS / Hybrid\_REINFORCE | Batch REINFORCE (on-policy) | Hybrid discrete+continuous | ✅ Ready |
-| RENEW | REINFORCE + Refine Head | Hybrid discrete+continuous | ✅ Ready |
-| PPO-QAS | PPO | Discrete | 🔲 Planned |
-| A2C-hybrid | A2C | Hybrid | 🔲 Planned |
-| CRLQAS-STOP | DQN + STOP action | Discrete + STOP | 🔲 Planned |
+| Method | RL Algorithm | Action Space |
+|--------|-------------|--------------|
+| CRLQAS | DQN (off-policy) | Discrete |
+| HyRLQAS / Hybrid\_REINFORCE | Batch REINFORCE (on-policy) | Hybrid discrete+continuous |
+| RENEW | REINFORCE + Refine Head | Hybrid discrete+continuous |
 
 ### Non-RL Baselines
 
-| Method | Type | Status |
-|--------|------|--------|
-| QuantumDARTS | Differentiable NAS (ICML 2023) | ✅ Ready |
-| TFQAS | Training-free zero-cost proxy | ✅ Ready |
-| ADAPT-VQE | Greedy / classical | 🔲 Partial |
-| Random Search | Random | 🔲 Planned |
+| Method | Type |
+|--------|------|
+| QuantumDARTS | Differentiable NAS (ICML 2023) |
+| TFQAS | Training-free zero-cost proxy |
 
 #### QuantumDARTS: nfev accounting
 
@@ -633,8 +628,3 @@ These are documented as findings; fixes are noted where planned:
 
 5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `analysis_snapshots` trace format (with legacy `first_hit_snapshot` fallback), which requires re-running experiments to populate for old runs.
 
----
-
-## Citation
-
-> Paper under review — NeurIPS 2026.  Citation will be added upon acceptance.
