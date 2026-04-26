@@ -1,0 +1,9 @@
+rank	action	count
+1	CNOT(0->4)	81
+2	RY(q=0)	44
+3	CNOT(0->2)	11
+4	CNOT(3->4)	10
+5	CNOT(2->5)	8
+6	CNOT(4->5)	7
+7	CNOT(0->5)	4
+8	CNOT(2->3)	2

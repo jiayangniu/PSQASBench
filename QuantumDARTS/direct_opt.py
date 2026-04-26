@@ -126,6 +126,10 @@ class DirectGateBatchOptimizer:
         probe = np.asarray(angles, dtype=np.float32).reshape(1, -1)
         return float(self._energy_batch(state_gpu, probe)[0])
 
+    def evaluate_state(self, state_tensor: torch.Tensor, angles: np.ndarray) -> float:
+        state_gpu = state_tensor.to(self.device)
+        return self._energy_single(state_gpu, np.asarray(angles, dtype=np.float32))
+
     def _empty_result(self, item: PreparedCircuit) -> dict:
         state_gpu = item.state_tensor.to(self.device)
         total_energy = self._energy_single(state_gpu, np.empty((0,), dtype=np.float32))

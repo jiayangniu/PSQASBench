@@ -38,9 +38,9 @@ from .vqe_eval import VQEResult, evaluate_circuit
 def _expr_worker(args):
     """Compute expressibility for one circuit. Top-level so it can be pickled."""
     import sys, pathlib
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    from circuit import Circuit
-    from expressibility import compute_expressibility
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+    from TFQAS.circuit import Circuit
+    from TFQAS.expressibility import compute_expressibility
     import numpy as np
     gates, n_qubits, n_samples, n_bins, seed = args
     rng = np.random.default_rng(seed)
@@ -76,12 +76,15 @@ def run_tf_qas(
     S: int = 10000,
     R: int = 1000,
     K: int = 10,
-    pipeline: str = 'layerwise',
+    pipeline: str = 'gatewise',
     n_expr_samples: int = 2000,
     n_bins: int = 75,
     mol: dict | None = None,
     n_vqe_restarts: int = 3,
     cobyla_maxiter: int = 1000,
+    connectivity: str = "all",
+    gate_mode: str = "primitive",
+    two_qubit_prob: float = 0.5,
     seed: int | None = None,
     verbose: bool = True,
     n_workers: int | None = None,
@@ -90,20 +93,24 @@ def run_tf_qas(
     Run the two-stage TF-QAS algorithm.
 
     Args:
-        n_qubits:       number of qubits
-        n_layers:       number of (single + two-qubit) layers per circuit
-        S:              number of circuits to sample in Stage 1
-        R:              number of circuits kept after Stage 1 (R << S)
-        K:              number of circuits returned (K <= R)
-        pipeline:       'layerwise' or 'random'
-        n_expr_samples: number of random parameter pairs for expressibility
-        n_bins:         histogram bins for expressibility
-        mol:            dict from load_molecule(), if None skips VQE evaluation
-        n_vqe_restarts: COBYLA restarts per circuit in VQE evaluation
-        cobyla_maxiter: COBYLA max iterations
-        seed:           random seed
-        verbose:        print progress
-        n_workers:      number of parallel processes for Stage 2 (default: all CPUs)
+        n_qubits:        number of qubits
+        n_layers:        max gate count per circuit (gatewise) or max qubit depth (layerwise)
+        S:               number of circuits to sample in Stage 1
+        R:               number of circuits kept after Stage 1 (R << S)
+        K:               number of circuits returned (K <= R)
+        pipeline:        'gatewise' — gate-by-gate placement with n_gates ~ Uniform[1, n_layers]
+                         'layerwise' — half-layer pairs up to max qubit depth n_layers (paper mode)
+        n_expr_samples:  number of random parameter pairs for expressibility
+        n_bins:          histogram bins for expressibility
+        mol:             dict from load_molecule(), if None skips VQE evaluation
+        n_vqe_restarts:  COBYLA restarts per circuit in VQE evaluation
+        cobyla_maxiter:  COBYLA max iterations
+        connectivity:    qubit connectivity ('all' or 'linear')
+        gate_mode:       'primitive' ({rx,ry,rz,cnot}) or 'paper' ({rx,ry,rz,xx,yy,zz})
+        two_qubit_prob:  fraction of two-qubit gates in gatewise sampling (default 0.5)
+        seed:            random seed
+        verbose:         print progress
+        n_workers:       number of parallel processes for Stage 2 (default: all CPUs)
 
     Returns:
         List of TFQASResult sorted by expressibility (best first, length K).
@@ -118,11 +125,22 @@ def run_tf_qas(
     _log(f"\n[TF-QAS] Stage 1 — sampling {S} circuits ({pipeline}) ...")
     t0 = time.time()
 
-    sampler: Callable = (
-        (lambda: sample_layerwise(n_qubits, n_layers, rng))
-        if pipeline == 'layerwise'
-        else (lambda: sample_random(n_qubits, n_layers * n_qubits, rng))
-    )
+    if pipeline == 'gatewise':
+        # Each circuit gets a fresh random gate count in [1, n_layers].
+        # gate-by-gate placement creates genuine depth diversity.
+        def sampler() -> "Circuit":
+            n_gates = int(rng.integers(1, n_layers + 1))
+            return sample_random(
+                n_qubits, n_gates, rng,
+                two_qubit_prob=two_qubit_prob,
+                connectivity=connectivity,
+                gate_mode=gate_mode,
+            )
+    elif pipeline == 'layerwise':
+        def sampler() -> "Circuit":
+            return sample_layerwise(n_qubits, n_layers, rng, gate_mode=gate_mode)
+    else:
+        raise ValueError(f"Unknown pipeline '{pipeline}'. Use 'gatewise' or 'layerwise'.")
 
     circuits = [sampler() for _ in range(S)]
     path_counts = np.array([c.path_count for c in circuits])

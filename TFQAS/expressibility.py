@@ -40,28 +40,32 @@ def compute_expressibility(
 
     Returns:
         Scalar ε ≤ 0.  Higher (less negative) means more expressive.
-        Returns 0.0 for circuits with zero parameters (no randomness).
+        Circuits with zero parameters are still evaluated: their fidelity
+        distribution collapses to F = 1, which should yield a very poor
+        expressibility score rather than 0.0.
     """
-    if circuit.n_params == 0:
-        return 0.0
-
     if rng is None:
         rng = np.random.default_rng()
 
     N = 2 ** circuit.n_qubits
 
     # ── Sample fidelities ────────────────────────────────────────────────────
-    # Draw 2*n_samples random parameter vectors, run pairs (i, i+n_samples)
-    all_params = rng.uniform(-np.pi, np.pi, size=(2 * n_samples, circuit.n_params))
+    if circuit.n_params == 0:
+        # Zero-parameter circuits induce a single deterministic state, so the
+        # fidelity distribution is a delta peak at F = 1.
+        overlaps = np.ones(n_samples, dtype=np.float64)
+    else:
+        # Draw 2*n_samples random parameter vectors, run pairs (i, i+n_samples)
+        all_params = rng.uniform(-np.pi, np.pi, size=(2 * n_samples, circuit.n_params))
 
-    # Pre-compute all statevectors in a batch
-    statevecs = np.array([circuit.statevector(p) for p in all_params])  # (2*S, D)
+        # Pre-compute all statevectors in a batch
+        statevecs = np.array([circuit.statevector(p) for p in all_params])  # (2*S, D)
 
-    sv_a = statevecs[:n_samples]       # (S, D)
-    sv_b = statevecs[n_samples:]       # (S, D)
+        sv_a = statevecs[:n_samples]       # (S, D)
+        sv_b = statevecs[n_samples:]       # (S, D)
 
-    # |<ψ_a|ψ_b>|²
-    overlaps = np.abs(np.einsum('ij,ij->i', sv_a.conj(), sv_b)) ** 2  # (S,)
+        # |<ψ_a|ψ_b>|²
+        overlaps = np.abs(np.einsum('ij,ij->i', sv_a.conj(), sv_b)) ** 2  # (S,)
 
     # ── Build empirical histogram ─────────────────────────────────────────────
     bins = np.linspace(0.0, 1.0, n_bins + 1)

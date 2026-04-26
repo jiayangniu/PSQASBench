@@ -1,68 +1,85 @@
 """
-search_space.py — Circuit sampling strategies.
+search_space.py — TF-QAS circuit sampling strategies.
 
-Layerwise pipeline (paper's primary search space):
-    Alternate between:
-      • Single-qubit sublayer: one randomly chosen rotation gate per qubit
-      • Two-qubit sublayer: CNOT gates on alternating pairs
-                            even offset: (0,1),(2,3),…
-                            odd offset:  (1,2),(3,4),…
+The primary layerwise pipeline samples structured half-layers:
 
-Each call to sample_layerwise() returns one Circuit with the gate list
-determined randomly (gate types chosen independently per gate).
+  - Single-qubit half-layer: choose one gate type from {rx, ry, rz} and
+    place it on either the even or odd qubit subset.
+  - Two-qubit half-layer: place gates on either the even-offset or odd-offset
+    adjacent pairs.
+
+`n_layers` is the **maximum qubit-level circuit depth**.  Half-layers are
+added until the next addition would exceed this limit, giving circuits with
+variable gate counts but bounded qubit depth.  Different random offset
+choices lead to different qubit-depth profiles and therefore genuinely
+different circuit structures.
 """
 
-import numpy as np
-from .circuit import Circuit
+from __future__ import annotations
 
-SINGLE_GATES = ['rx', 'ry', 'rz']
-TWO_QUBIT_GATE = 'cnot'
+import numpy as np
+
+from .circuit import Circuit, SINGLE_GATES, TWO_QUBIT_GATES
+
+
+def _adjacent_pairs(n_qubits: int, offset: int) -> list[tuple[int, int]]:
+    return [(q, q + 1) for q in range(offset, n_qubits - 1, 2)]
 
 
 def sample_layerwise(
     n_qubits: int,
     n_layers: int,
     rng: np.random.Generator,
-    cnot_prob: float = 0.7,
+    gate_mode: str = "primitive",
 ) -> Circuit:
+    """Sample a layerwise circuit bounded by qubit depth n_layers.
+
+    Half-layers are added until the next half-layer would push the qubit-level
+    circuit depth past n_layers.  Different random offset choices create
+    different per-qubit depth profiles, so circuits naturally vary in structure
+    while staying within the same depth budget.
+
+    gate_mode='primitive' : two-qubit half-layer uses CNOT (non-parameterised).
+    gate_mode='paper'     : two-qubit half-layer uses {xx, yy, zz} (parameterised).
     """
-    Sample a layerwise circuit.
+    gates: list[tuple[str, tuple[int, ...]]] = []
+    moments = [0] * n_qubits  # qubit-level depth for each qubit
 
-    Each "layer" consists of:
-      1. A single-qubit sublayer: one rotation gate per qubit (type drawn uniformly
-         from {rx, ry, rz}).
-      2. A two-qubit sublayer: each CNOT position (even or odd qubit pairs,
-         alternating per layer) is independently included with probability
-         cnot_prob. Skipped positions are replaced by a rotation gate on the
-         lower qubit. This randomises circuit topology and creates variation
-         in DAG path counts for Stage 1 filtering.
+    while True:
+        # --- single-qubit half-layer ---
+        single_gate = str(rng.choice(tuple(SINGLE_GATES)))
+        single_offset = int(rng.integers(0, 2))
+        rot_qubits = list(range(single_offset, n_qubits, 2))
 
-    Args:
-        n_qubits:  number of qubits
-        n_layers:  number of (single + two-qubit) layer pairs
-        rng:       numpy random generator
-        cnot_prob: probability of placing a CNOT at each candidate position
+        new_moments = list(moments)
+        for q in rot_qubits:
+            new_moments[q] += 1
+        if max(new_moments) > n_layers:
+            break
+        moments = new_moments
+        for q in rot_qubits:
+            gates.append((single_gate, (q,)))
 
-    Returns:
-        Circuit object
-    """
-    gates = []
+        # --- two-qubit half-layer ---
+        pair_offset = int(rng.integers(0, 2))
+        pairs = _adjacent_pairs(n_qubits, pair_offset)
 
-    for layer in range(n_layers):
-        # ── Single-qubit sublayer ─────────────────────────────────────────────
-        for q in range(n_qubits):
-            gate_type = SINGLE_GATES[rng.integers(0, len(SINGLE_GATES))]
-            gates.append((gate_type, (q,)))
+        new_moments = list(moments)
+        for q0, q1 in pairs:
+            d = max(new_moments[q0], new_moments[q1]) + 1
+            new_moments[q0] = d
+            new_moments[q1] = d
+        if max(new_moments) > n_layers:
+            break
+        moments = new_moments
 
-        # ── Two-qubit sublayer (alternating even/odd offset) ──────────────────
-        offset = layer % 2           # 0 → (0,1),(2,3),…   1 → (1,2),(3,4),…
-        for q in range(offset, n_qubits - 1, 2):
-            if rng.random() < cnot_prob:
-                gates.append((TWO_QUBIT_GATE, (q, q + 1)))
-            else:
-                # Replace with a single-qubit gate to keep circuit length similar
-                gate_type = SINGLE_GATES[rng.integers(0, len(SINGLE_GATES))]
-                gates.append((gate_type, (q,)))
+        if gate_mode == "primitive":
+            for q0, q1 in pairs:
+                gates.append(("cnot", (q0, q1)))
+        else:
+            two_gate = str(rng.choice(tuple(TWO_QUBIT_GATES)))
+            for q0, q1 in pairs:
+                gates.append((two_gate, (q0, q1)))
 
     return Circuit(n_qubits, gates)
 
@@ -71,30 +88,27 @@ def sample_random(
     n_qubits: int,
     n_gates: int,
     rng: np.random.Generator,
-    two_qubit_prob: float = 0.3,
+    two_qubit_prob: float = 0.5,
+    connectivity: str = "all",
+    gate_mode: str = "primitive",
 ) -> Circuit:
-    """
-    Sample a random circuit by independently drawing each gate.
+    gates: list[tuple[str, tuple[int, ...]]] = []
+    connectivity = str(connectivity).strip().lower()
 
-    Args:
-        n_qubits:       number of qubits
-        n_gates:        total number of gates
-        rng:            numpy random generator
-        two_qubit_prob: probability that each gate is a CNOT (vs a rotation)
-
-    Returns:
-        Circuit object
-    """
-    gates = []
     for _ in range(n_gates):
         if n_qubits >= 2 and rng.random() < two_qubit_prob:
-            ctrl = int(rng.integers(0, n_qubits))
-            targ = int(rng.integers(0, n_qubits - 1))
-            if targ >= ctrl:
-                targ += 1
-            gates.append((TWO_QUBIT_GATE, (ctrl, targ)))
+            if connectivity == "linear":
+                q0 = int(rng.integers(0, n_qubits - 1))
+                q1 = q0 + 1
+            else:
+                q0, q1 = sorted(rng.choice(n_qubits, size=2, replace=False).tolist())
+            if gate_mode == "primitive":
+                gates.append(("cnot", (q0, q1)))
+            else:
+                gate_type = str(rng.choice(tuple(TWO_QUBIT_GATES)))
+                gates.append((gate_type, (q0, q1)))
         else:
-            gate_type = SINGLE_GATES[rng.integers(0, len(SINGLE_GATES))]
+            gate_type = str(rng.choice(tuple(SINGLE_GATES)))
             q = int(rng.integers(0, n_qubits))
             gates.append((gate_type, (q,)))
 

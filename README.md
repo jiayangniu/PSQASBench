@@ -95,6 +95,7 @@ d(ψᵢ, ψⱼ) = 1 − |⟨ψᵢ|ψⱼ⟩|²
 |--------|------|
 | QuantumDARTS | Differentiable NAS (ICML 2023) |
 | TFQAS | Training-free zero-cost proxy |
+| GQEQAS | Generative sequence model (GPT-style autoregressive circuit generation) |
 
 #### QuantumDARTS: nfev accounting
 
@@ -104,6 +105,32 @@ QuantumDARTS has two phases with fundamentally different evaluation semantics:
 - **Phase 2 (Discrete Evaluation):** Fixes architecture weights with argmax and evaluates real discrete circuits.  This is the only phase whose nfev is comparable to RL baselines and is reported as `phase2_nfev`.
 
 Papers must report Phase 1 and Phase 2 nfev separately to avoid misleading comparisons.
+
+#### GQEQAS: generative autoregressive circuit search
+
+GQEQAS adapts the Generative Quantum Eigensolver (GQE) into the PSQASBench framework.  A GPT-2 style decoder-only transformer (GPTQE) autoregressively generates circuit token sequences; the operator pool serves as the vocabulary.  The model is trained via a **logit-matching loss**: the cumulative sum of chosen-token logits is regressed toward ground-truth prefix energies, teaching the model to assign higher probability to tokens that reduce energy.
+
+Two operator pool types are supported:
+
+| Pool | Vocabulary | Angle handling |
+|------|-----------|----------------|
+| `primitive` | RX/RY/RZ (fixed π-equal angles) + CNOT pairs | Fixed angles in pool; COBYLA/Rotosolve re-optimises after generation |
+| `ucc` | UCCSD excitation operators via PennyLane | Time-evolution angles via logspace schedule |
+
+For the `primitive` pool with `num_op_times = 8`, the rotation angles are `[π/8, π/4, 3π/8, π/2, 5π/8, 3π/4, 7π/8, π]` (π equal divisions).
+
+**Variable-length generation** — `seq_len` is a maximum; actual circuit length is sampled from `Uniform[1, seq_len]` per batch when `length_mode = uniform`.  Shorter sequences are zero-padded in the replay buffer to keep array shapes consistent.
+
+**Training modes:**
+
+| Mode | Description |
+|------|-------------|
+| `offline` | Pre-builds a random-circuit dataset then trains to convergence |
+| `online` | Model generates circuits → evaluate energies → add to replay buffer → train; repeats with temperature annealing |
+
+Post-generation re-optimisation is controlled by `training_reopt` (during training) and `benchmark_reopt` (during eval).
+
+Both `--method gqe` and `--method gqeqas` invoke the same `GQERunner`; configs live under `configs/gqe/`.  Use `gqeqas` to write results to `results/gqeqas/` (recommended for benchmark tracking).
 
 ---
 
@@ -190,6 +217,21 @@ python main.py --method crlqas --mol L1_BeH2_STO3G_6q \
 
 # QuantumDARTS on L1 BeH2
 python main.py --method qdarts --mol L1_BeH2_STO3G_6q --seed 11111 --device cuda:0
+
+# GQEQAS on L1 BeH2 (depth10 reference config)
+python main.py --method gqeqas --mol L1_BeH2_STO3G_6q \
+               --config Formal_EXP/L1_BeH2_STO3G_6q_depth10.cfg \
+               --seed 11111 --device cuda:1
+
+# GQEQAS on L2 LiH
+python main.py --method gqeqas --mol L2_LiH_Equil_6q \
+               --config Formal_EXP/L2_LiH_Equil_6q.cfg \
+               --seed 11111 --device cuda:1
+
+# GQEQAS on L6 BeH2 14q (large, Rotosolve)
+python main.py --method gqeqas --mol L6_BeH2_CCPVDZ_14q \
+               --config Formal_EXP/L6_BeH2_CCPVDZ_14q.cfg \
+               --seed 11111 --device cuda:3
 ```
 
 All output is written to:
@@ -223,7 +265,7 @@ python main.py \
 
 Commonly changed flags:
 
-- `--method`: choose benchmark runner (`crlqas`, `hyrlqas`, `qdarts`, `tfqas`)
+- `--method`: choose benchmark runner (`crlqas`, `hyrlqas`, `qdarts`, `tfqas`, `gqeqas`/`gqe`)
 - `--mol`: molecule key from `bench_utils.MOL_FILES`
 - `--config`: config file relative to `configs/<method>/`
 - `--seed`: random seed; creates a separate `seed<seed>` result directory
@@ -269,7 +311,7 @@ What they control:
 
 ## Configuration Reference
 
-Config files live under `configs/crlqas/`, `configs/hyrlqas/`, `configs/qdarts/`, `configs/tfqas/`.
+Config files live under `configs/crlqas/`, `configs/hyrlqas/`, `configs/qdarts/`, `configs/tfqas/`, `configs/gqe/`.
 
 ```ini
 [general]
@@ -300,6 +342,78 @@ method = scipy_each_step
 optim_alg = COBYLA        # COBYLA | Rotosolve | SPSA | AdamSPSA | PSRAdam
 global_iters = 100
 ```
+
+### GQEQAS config reference
+
+```ini
+[env]
+num_qubits = 6
+accept_err = 0.0016               # chemical accuracy threshold (Ha)
+analysis_save_threshold = 0.0016  # save circuit snapshots below this energy error
+active_electrons = 2              # active-space electrons (must match .npz generation)
+active_orbitals = 3               # active-space orbitals (= num_qubits // 2 by default)
+connectivity = all                # all | linear (linear required for L5)
+
+[operator_pool]
+pool_kind = primitive             # primitive | ucc
+include_minus = 1                 # include ±angle variants (primitive pool only)
+num_op_times = 8                  # number of angle discretisation points
+# primitive pool: angles = linspace(π/n, π, n)  [π equal divisions]
+# ucc pool:       times  = logspace(min_exp, max_exp, n) / divisor
+op_time_min_exp = -2.0
+op_time_max_exp = 0.0
+op_time_divisor = 160.0
+
+[model]
+seq_len = 50                      # maximum circuit length (tokens)
+length_mode = uniform             # fixed | uniform — uniform draws L ~ Uniform[1, seq_len]
+train_size = 1024                 # offline dataset size (offline mode only)
+n_layer = 6                       # transformer depth
+n_head = 8                        # attention heads
+n_embd = 256                      # embedding dimension
+dropout = 0.1
+
+[training]
+training_mode = online            # offline | online
+epochs = 4000
+lr = 0.00005
+batch_splits = 16                 # gradient accumulation steps (effective batch = train_size / batch_splits per epoch)
+eval_every = 200                  # evaluate every N epochs
+eval_n_sequences = 100            # sequences generated during each eval
+eval_temperature = 0.001          # near-greedy decoding for eval
+train_temperature = 1.0           # sampling temperature during training
+# online-mode specific
+online_sample_count = 128         # fresh circuits generated per refresh
+online_refresh_every = 25         # epochs between online data refreshes
+online_temperature_final = 0.05   # annealing end temperature
+online_temperature_schedule = linear
+replay_buffer_size = 2048         # FIFO replay buffer capacity (0 = disabled)
+replay_mix_ratio = 0.5            # fraction of batch drawn from replay buffer
+warmup_epochs = 400               # epochs of offline pre-training before online loop
+
+[general]
+compute_pcd = 0                   # 0 | 1 — compute D_struct / D_func (expensive)
+training_reopt = 1                # re-optimise angles after each training-time generation
+benchmark_reopt = 1               # re-optimise angles during eval
+
+[non_local_opt]                   # same fields as RLQAS; inherited by training/eval reopt
+method = scipy_each_step
+optim_alg = COBYLA                # COBYLA | Rotosolve | SPSA | AdamSPSA | PSRAdam
+global_iters = 100
+n_restarts = 1
+# for large molecules (≥ 10q) Rotosolve with batched GPU path is preferred:
+# optim_alg = Rotosolve
+# rotosolve_sweeps = 2
+# global_batched_rotosolve = 1
+# parallel_eval_batch_size = 8
+```
+
+**Key tuning notes:**
+
+- `seq_len` / `length_mode`: set `seq_len` to match the RL gate budget for the molecule tier (50 for 4q/6q, 70 for 8q, 100 for 10q+); always use `length_mode = uniform` for Formal_EXP runs so the model sees variable-length circuits.
+- `warmup_epochs`: pre-training on random circuits before the online loop stabilises the logit-matching loss early; set to ~10% of total `epochs`.
+- `eval_every` / `eval_n_sequences`: controls how often eval checkpoints are written; `eval_n_sequences = 100` matches the RL `eval_K` budget.
+- `replay_buffer_size` / `replay_mix_ratio`: replay improves sample efficiency in the online loop; `replay_mix_ratio = 0.5` means half the batch is fresh, half from history.
 
 ---
 
@@ -535,7 +649,7 @@ All outputs are written under `--out-dir` (default: `critical_structure_analysis
 ## Pipeline Overview
 
 ```text
-Training run (CRLQAS / HyRLQAS / RENEW / TFQAS / QuantumDARTS)
+Training run (CRLQAS / HyRLQAS / RENEW / TFQAS / QuantumDARTS / GQEQAS)
     │
     ├── results/<method>/<mol>/<config>/seed<seed>/
     │   ├── episode_traces.txt     ← main input for analysis
@@ -588,6 +702,13 @@ PSQASBench/
 │   ├── search_space.py            # search space definition
 │   └── vqe_eval.py                # VQE evaluation helper
 │
+├── GQEQAS/                        # Generative QAS (GPT-style autoregressive)
+│   ├── gqe_runner.py              # GQERunner (BaseRunner subclass); offline + online modes
+│   ├── model.py                   # GPTQE: GPT-2 style decoder-only transformer
+│   ├── mol_adapter.py             # operator pool construction (primitive / UCC)
+│   ├── compiler.py                # compile pool operator tokens → primitive gate list
+│   └── energy_eval.py             # prefix energy evaluation for logit-matching loss
+│
 ├── metrics/
 │   ├── eval_utils.py              # greedy_rollout_k, stochastic_rollout_k, aggregate_metrics
 │   └── pcd.py                     # D_struct / D_func via state-vector infidelity
@@ -605,7 +726,9 @@ PSQASBench/
 │   ├── crlqas/                    # .cfg files for CRLQAS experiments
 │   ├── hyrlqas/                   # .cfg files for HyRLQAS experiments
 │   ├── qdarts/                    # .cfg files for QuantumDARTS experiments
-│   └── tfqas/                     # .cfg files for TFQAS experiments
+│   ├── tfqas/                     # .cfg files for TFQAS experiments
+│   └── gqe/                       # .cfg files for GQEQAS experiments (used by both --method gqe and gqeqas)
+│       └── Formal_EXP/            # standard benchmark sweep configs (L1–L6)
 │
 ├── mol_data/                      # pre-computed .npz Hamiltonians (Jordan-Wigner, 29 files)
 ├── mol_gen/                       # scripts to (re-)generate Hamiltonians and fingerprints
