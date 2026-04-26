@@ -1,3 +1,0 @@
-episode_key	run_dir	method	molecule	config	seed	episode	snapshot_index	event_step	event_error_mha	last_action	prefix_len
-qdarts__L1_BeH2_STO3G_6q__L1_BeH2_STO3G_6q__seed11111__ep16__snap0	/home/ubuntu/NeurIPS2026/PSQASBench/results/qdarts/L1_BeH2_STO3G_6q/L1_BeH2_STO3G_6q/seed11111	qdarts	L1_BeH2_STO3G_6q	L1_BeH2_STO3G_6q	seed11111	16	0	1	0.5544	CNOT(1->2)	16
-qdarts__L1_BeH2_STO3G_6q__L1_BeH2_STO3G_6q__seed11111__ep18__snap0	/home/ubuntu/NeurIPS2026/PSQASBench/results/qdarts/L1_BeH2_STO3G_6q/L1_BeH2_STO3G_6q/seed11111	qdarts	L1_BeH2_STO3G_6q	L1_BeH2_STO3G_6q	seed11111	18	0	1	0.5544	RZ(q=1)	18

@@ -1,3 +1,0 @@
-rank	count	retained_gates	retained_gates_with_angles_variants
-1	1	RY(q=2) | CNOT(2->4) | CNOT(4->5) | CNOT(5->2)	count=1: RY(q=2,θ=+3.142) | CNOT(2->4) | CNOT(4->5) | CNOT(5->2)
-2	1	RY(q=5) | CNOT(5->1) | CNOT(1->4) | RY(q=1)	count=1: RY(q=5,θ=-3.142) | CNOT(5->1) | CNOT(1->4) | RY(q=1,θ=-3.142)

@@ -1,3 +1,0 @@
-episode_key	run_dir	method	molecule	config	seed	episode	snapshot_index	event_step	event_error_mha	last_action	prefix_len
-gqe__L1_BeH2_STO3G_6q__L1_BeH2_STO3G_6q__seed11111__ep134__snap0	/home/ubuntu/NeurIPS2026/PSQASBench/results/gqe/L1_BeH2_STO3G_6q/Formal_EXP/L1_BeH2_STO3G_6q/seed11111	gqe	L1_BeH2_STO3G_6q	L1_BeH2_STO3G_6q	seed11111	134	0	1	0.5511	CNOT(0->4)	249
-gqe__L1_BeH2_STO3G_6q__L1_BeH2_STO3G_6q__seed11111__ep323__snap0	/home/ubuntu/NeurIPS2026/PSQASBench/results/gqe/L1_BeH2_STO3G_6q/Formal_EXP/L1_BeH2_STO3G_6q/seed11111	gqe	L1_BeH2_STO3G_6q	L1_BeH2_STO3G_6q	seed11111	323	0	1	0.5545	CNOT(0->4)	95

@@ -1,9 +1,0 @@
-rank	count	retained_gates
-1	2	RY(q=4) | CNOT(4->5)
-2	2	RX(q=4) | RY(q=5)
-3	1	RX(q=5) | CNOT(5->4) | CNOT(2->1)
-4	1	CNOT(0->3) | RX(q=5) | RX(q=4) | CNOT(4->5)
-5	1	RY(q=5) | RY(q=4)
-6	1	RY(q=4) | RY(q=5)
-7	1	RX(q=5) | CNOT(5->2) | CNOT(2->5) | RY(q=5) | CNOT(2->4) | CNOT(5->3) | CNOT(2->3) | RY(q=2)
-8	1	RX(q=5) | RX(q=4)

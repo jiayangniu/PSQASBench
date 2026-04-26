@@ -1,8 +1,0 @@
-rank	count	retained_gates	retained_gates_with_angles_variants
-1	3	RX(q=4) | RX(q=5)	count=1: RX(q=4,θ=-3.142) | RX(q=5,θ=-3.142) || count=1: RX(q=4,θ=+3.142) | RX(q=5,θ=+3.142) || count=1: RX(q=4,θ=+3.142) | RX(q=5,θ=-3.142)
-2	2	RX(q=5) | CNOT(5->4)	count=1: RX(q=5,θ=+3.142) | CNOT(5->4) || count=1: RX(q=5,θ=-3.142) | CNOT(5->4)
-3	1	RY(q=5) | RX(q=4)	count=1: RY(q=5,θ=+3.142) | RX(q=4,θ=+3.142)
-4	1	RY(q=4) | RX(q=5)	count=1: RY(q=4,θ=+3.142) | RX(q=5,θ=-3.142)
-5	1	RY(q=4) | RY(q=5)	count=1: RY(q=4,θ=+3.142) | RY(q=5,θ=-3.142)
-6	1	RX(q=4) | RY(q=5)	count=1: RX(q=4,θ=+3.142) | RY(q=5,θ=+3.142)
-7	1	RX(q=4) | CNOT(4->5)	count=1: RX(q=4,θ=+3.142) | CNOT(4->5)
