@@ -26,3 +26,13 @@ run_*.sh
 
 # Analysis outputs (data, not code)
 critical_structure_analysis/
+# Local results (large, machine-specific)
+results_local/
+results
+
+# Optimizer run logs directory
+optimizer_nohup_logs/
+
+# Intermediate analysis outputs
+gate_bias_analysis/
+critical_structure_analysis_old/

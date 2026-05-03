@@ -277,6 +277,7 @@ class GQERunner(BaseRunner):
         self._all_rollouts: list[dict] = []
         self._best_eval_metrics: dict | None = None
         self._best_eval_rollout: dict | None = None
+        self._best_train_rollout: dict | None = None
         self._best_global_rollout: dict | None = None
         self._best_model_epoch: int | None = None
         self._best_model_source: str | None = None
@@ -285,6 +286,7 @@ class GQERunner(BaseRunner):
     def run(self) -> dict:
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
+        run_start = time.perf_counter()
 
         print(
             f"[GQE] n_qubits={self.n_qubits}  seq_len={self.seq_len}  "
@@ -411,7 +413,7 @@ class GQERunner(BaseRunner):
 
         np.save(self.result_dir / "losses.npy", np.asarray(losses, dtype=np.float64))
         self.save_result(result)
-        self._write_run_meta(total_time)
+        self._write_run_meta(total_time, time.perf_counter() - run_start)
         self._write_config_used_cfg()
         self._write_best_eval()
         self._write_discrete_eval_history()
@@ -774,6 +776,9 @@ class GQERunner(BaseRunner):
         model: GPTQE,
         epoch: int,
     ) -> None:
+        if str(rollout.get("source", "")) != "eval":
+            if self._best_train_rollout is None or self._rollout_is_better(rollout, self._best_train_rollout):
+                self._best_train_rollout = rollout
         if self._best_global_rollout is None or self._rollout_is_better(rollout, self._best_global_rollout):
             self._best_global_rollout = rollout
             self._best_model_epoch = int(epoch)
@@ -1099,7 +1104,7 @@ class GQERunner(BaseRunner):
                 best = rollout
         return best
 
-    def _write_run_meta(self, total_time_s: float) -> None:
+    def _write_run_meta(self, total_time_s: float, wall_clock_sec: float) -> None:
         lines = [
             "method                     = GQE",
             f"variant                    = {self.variant}",
@@ -1151,6 +1156,7 @@ class GQERunner(BaseRunner):
             f"best_model_epoch           = {self._best_model_epoch if self._best_model_epoch is not None else -1}",
             f"best_model_source          = {self._best_model_source if self._best_model_source is not None else 'unknown'}",
             f"total_time_s               = {total_time_s:.1f}",
+            f"wall_clock_sec             = {wall_clock_sec:.1f}",
         ]
         for key, value in self.optim_options.items():
             lines.append(f"{key:27s} = {value}")
@@ -1304,45 +1310,54 @@ class GQERunner(BaseRunner):
         (self.result_dir / "episode_traces.txt").write_text("\n".join(lines), encoding="utf-8")
 
     def _write_best_circuit(self) -> None:
-        rollout = self._best_global_rollout or self._best_eval_rollout
-        if rollout is None:
+        if self._best_train_rollout is None and self._best_eval_rollout is None:
             return
-        native_ops = rollout.get("native_ops", [])
-        lines = [
-            f"source           = {rollout.get('source', 'search_eval_best')}",
-            f"variant          = {self.variant}",
-            f"energy_ha        = {float(rollout['energy']):.8f}",
-            f"predicted_energy_ha = {float(rollout.get('predicted_energy', float('nan'))):.8f}",
-            f"energy_error_ha  = {float(rollout['energy_error']):.8f}",
-            f"energy_error_mha = {float(rollout['energy_error']) * 1000.0:.4f}",
-            f"cnot_count       = {int(rollout['cnot_count'])}",
-            f"rotation_count   = {int(rollout['rotation_count'])}",
-            f"compiled_depth   = {int(rollout['steps'])}",
-            f"token_len        = {int(rollout['token_len'])}",
-            f"token_sequence   = {rollout.get('token_sequence', [])}",
-            "",
-            "--- native operator sequence ---",
-        ]
-        for idx, op in enumerate(native_ops):
-            params = [float(p) for p in getattr(op, "parameters", ())]
-            wires = [int(w) for w in getattr(op, "wires", [])]
-            lines.append(
-                f"  token={idx:03d}  {str(getattr(op, 'name', type(op).__name__)):<24s} "
-                f"wires={wires}  params={params}"
-            )
-        lines.append("")
-        lines.append("--- compiled primitive circuit ---")
-        for op in rollout["op_history"]:
-            layer = int(op.get("layer", -1))
-            if op["type"] == "rot":
+        lines: list[str] = []
+
+        def _append_rollout_block(title: str, rollout: dict) -> None:
+            native_ops = rollout.get("native_ops", [])
+            lines.extend([
+                f"[{title}]",
+                f"source           = {rollout.get('source', 'unknown')}",
+                f"variant          = {self.variant}",
+                f"energy_ha        = {float(rollout['energy']):.8f}",
+                f"predicted_energy_ha = {float(rollout.get('predicted_energy', float('nan'))):.8f}",
+                f"energy_error_ha  = {float(rollout['energy_error']):.8f}",
+                f"energy_error_mha = {float(rollout['energy_error']) * 1000.0:.4f}",
+                f"cnot_count       = {int(rollout['cnot_count'])}",
+                f"rotation_count   = {int(rollout['rotation_count'])}",
+                f"compiled_depth   = {int(rollout['steps'])}",
+                f"token_len        = {int(rollout['token_len'])}",
+                f"token_sequence   = {rollout.get('token_sequence', [])}",
+                "",
+                "--- native operator sequence ---",
+            ])
+            for idx, op in enumerate(native_ops):
+                params = [float(p) for p in getattr(op, "parameters", ())]
+                wires = [int(w) for w in getattr(op, "wires", [])]
                 lines.append(
-                    f"  layer={layer}  {_AXIS_TO_LABEL[int(op['axis'])]}  "
-                    f"q={int(op['q'])}  angle={float(op['angle']):.6f}  "
-                    f"(src={op.get('source_name')}, token={op.get('source_token')})"
+                    f"  token={idx:03d}  {str(getattr(op, 'name', type(op).__name__)):<24s} "
+                    f"wires={wires}  params={params}"
                 )
-            else:
-                lines.append(
-                    f"  layer={layer}  CNOT  ctrl={int(op['ctrl'])}  targ={int(op['targ'])}  "
-                    f"(src={op.get('source_name')}, token={op.get('source_token')})"
-                )
+            lines.append("")
+            lines.append("--- compiled primitive circuit ---")
+            for op in rollout["op_history"]:
+                layer = int(op.get("layer", -1))
+                if op["type"] == "rot":
+                    lines.append(
+                        f"  layer={layer}  {_AXIS_TO_LABEL[int(op['axis'])]}  "
+                        f"q={int(op['q'])}  angle={float(op['angle']):.6f}  "
+                        f"(src={op.get('source_name')}, token={op.get('source_token')})"
+                    )
+                else:
+                    lines.append(
+                        f"  layer={layer}  CNOT  ctrl={int(op['ctrl'])}  targ={int(op['targ'])}  "
+                        f"(src={op.get('source_name')}, token={op.get('source_token')})"
+                    )
+            lines.append("")
+
+        if self._best_train_rollout is not None:
+            _append_rollout_block("best_train_circuit", self._best_train_rollout)
+        if self._best_eval_rollout is not None:
+            _append_rollout_block("best_eval_circuit", self._best_eval_rollout)
         (self.result_dir / "best_circuit.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

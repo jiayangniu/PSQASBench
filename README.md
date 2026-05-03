@@ -130,7 +130,7 @@ For the `primitive` pool with `num_op_times = 8`, the rotation angles are `[π/8
 
 Post-generation re-optimisation is controlled by `training_reopt` (during training) and `benchmark_reopt` (during eval).
 
-Both `--method gqe` and `--method gqeqas` invoke the same `GQERunner`; configs live under `configs/gqe/`.  Use `gqeqas` to write results to `results/gqeqas/` (recommended for benchmark tracking).
+Use `--method gqeqas` to invoke `GQERunner`; configs live under `configs/gqe/`, and results are written to `results/gqeqas/`.
 
 ---
 
@@ -265,7 +265,7 @@ python main.py \
 
 Commonly changed flags:
 
-- `--method`: choose benchmark runner (`crlqas`, `hyrlqas`, `qdarts`, `tfqas`, `gqeqas`/`gqe`)
+- `--method`: choose benchmark runner (`crlqas`, `hyrlqas`, `qdarts`, `tfqas`, `gqeqas`)
 - `--mol`: molecule key from `bench_utils.MOL_FILES`
 - `--config`: config file relative to `configs/<method>/`
 - `--seed`: random seed; creates a separate `seed<seed>` result directory
@@ -727,7 +727,7 @@ PSQASBench/
 │   ├── hyrlqas/                   # .cfg files for HyRLQAS experiments
 │   ├── qdarts/                    # .cfg files for QuantumDARTS experiments
 │   ├── tfqas/                     # .cfg files for TFQAS experiments
-│   └── gqe/                       # .cfg files for GQEQAS experiments (used by both --method gqe and gqeqas)
+│   └── gqe/                       # .cfg files for GQEQAS experiments
 │       └── Formal_EXP/            # standard benchmark sweep configs (L1–L6)
 │
 ├── mol_data/                      # pre-computed .npz Hamiltonians (Jordan-Wigner, 29 files)
@@ -750,4 +750,3 @@ These are documented as findings; fixes are noted where planned:
 4. **Curriculum Threshold Sensitivity** — The initial `accept_err` and tightening schedule affect convergence significantly but are rarely ablated.  Isolated via the LevelCheck experiment group in `configs/crlqas/LevelCheck_EXP/`.
 
 5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `analysis_snapshots` trace format (with legacy `first_hit_snapshot` fallback), which requires re-running experiments to populate for old runs.
-

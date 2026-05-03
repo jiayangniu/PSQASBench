@@ -3,7 +3,7 @@ import torch
 from pathlib import Path
 
 from bench_utils import (
-    MOL_DIR, CONFIG_DIR, RESULT_DIR, MOL_FILES,
+    MOL_DIR, CONFIG_DIR, MOL_FILES,
     METHOD_CONFIG_DIR, redirect_output, parse_args, get_runner,
 )
 
@@ -39,13 +39,16 @@ def main():
         config_tag = config_rel.with_suffix("")
     except ValueError:
         config_tag = Path(config_path.stem)
-    result_dir = RESULT_DIR / args['method'] / args['mol'] / config_tag / f"seed{seed}"
+    result_root = args["results_root"]
+    result_dir = result_root / args['method'] / args['mol'] / config_tag / f"seed{seed}"
     log_path   = result_dir / "run.log"
     log = redirect_output(log_path)
     print(f"[PSQASBench] method={args['method']}  mol={args['mol']}  "
           f"config={args['config']}  seed={seed}  device={device}")
+    print(f"[PSQASBench] results_root={result_root}")
     runner = get_runner(args['method'], config_path, mol_path,
                         result_dir, seed, device,
+                        mol_name=args["mol"],
                         save_summary_detailed=args["save_summary_detailed"],
                         use_wandb=args["use_wandb"])
     result = runner.run()

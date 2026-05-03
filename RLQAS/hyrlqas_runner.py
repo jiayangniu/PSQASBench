@@ -37,11 +37,13 @@ class HyRLQASRunner(BaseRunner):
         result_dir: Path,
         seed: int,
         device: torch.device | None = None,
+        mol_name: str | None = None,
         save_summary_detailed: int | None = None,
         use_wandb: int | None = None,
     ):
         self.config_path = Path(config_path)
         self.device      = device or torch.device("cpu")
+        self.mol_name    = mol_name
 
         self.conf = get_config(str(self.config_path))
         if save_summary_detailed is not None:
@@ -104,12 +106,8 @@ class HyRLQASRunner(BaseRunner):
         torch.save(agent.optim.state_dict(), self.result_dir / f"{tag}_optim.pth")
 
     def _mol_key(self) -> str:
-        parts = self.result_dir.parts
-        if "results" in parts:
-            idx = parts.index("results")
-            rel = parts[idx + 1 :]
-            if len(rel) >= 3:
-                return rel[1]
+        if self.mol_name:
+            return self.mol_name
         return self.result_dir.parents[1].name
 
     def _init_artifacts(self):

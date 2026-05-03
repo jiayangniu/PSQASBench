@@ -213,6 +213,30 @@ class BatchedVQE:
         energies = torch.real(torch.einsum('bi,ij,bj->b', psi.conj(), self.H, psi))
         return energies + self.shift
 
+    def batch_statevectors(self, state: "torch.Tensor", angle_batch: "torch.Tensor") -> "torch.Tensor":
+        """Return (B, 2^n) complex64 statevectors for B parameter vectors.
+
+        Identical gate traversal to eval_batch but returns psi instead of
+        energies.  Used for GPU-accelerated expressibility computation where
+        the Hamiltonian is not needed.
+        """
+        n = self.n
+        B = angle_batch.shape[0]
+        st = state.to(self.device)
+        psi = torch.zeros(B, self.dim, dtype=torch.complex64, device=self.device)
+        psi[:, 0] = 1.0
+        rot_idx = 0
+        for l in range(st.shape[0]):
+            layer = st[l]
+            cnot_targs, cnot_ctrls = (layer[:n] == 1).nonzero(as_tuple=True)
+            for targ, ctrl in zip(cnot_targs.tolist(), cnot_ctrls.tolist()):
+                psi = self._cnot(psi, ctrl, targ)
+            rot_axes, rot_qubits = (layer[n:n + 3] == 1).nonzero(as_tuple=True)
+            for axis_0, q in zip(rot_axes.tolist(), rot_qubits.tolist()):
+                psi = self._rot(psi, axis_0 + 1, q, angle_batch[:, rot_idx])
+                rot_idx += 1
+        return psi
+
     # ── gate helpers ──────────────────────────────────────────────────────────
 
     def _rot(self, psi, axis: int, q: int, thetas):

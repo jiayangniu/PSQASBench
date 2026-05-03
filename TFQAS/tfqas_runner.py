@@ -204,7 +204,8 @@ class TFQASRunner(BaseRunner):
         from .tf_qas import run_tf_qas
 
         set_seed(self.seed, device=self.device)
-        t0 = time.perf_counter()
+        run_start = time.perf_counter()
+        t0 = run_start
 
         print(
             f"[TF-QAS] n_qubits={self.n_qubits}  n_layers={self.n_layers}  "
@@ -240,6 +241,7 @@ class TFQASRunner(BaseRunner):
             seed=self.seed,
             verbose=True,
             n_workers=self.n_workers,
+            bvqe=self._direct_optimizer._bvqe,
         )
 
         search_time = time.perf_counter() - t0
@@ -335,7 +337,7 @@ class TFQASRunner(BaseRunner):
         }
 
         npz_path = self.save_result(result)
-        self._write_run_meta(search_time, eval_time)
+        self._write_run_meta(search_time, eval_time, time.perf_counter() - run_start)
         self._write_config_used_cfg()
         self._write_best_eval()
         self._write_discrete_eval_history()
@@ -541,7 +543,7 @@ class TFQASRunner(BaseRunner):
             encoding="utf-8",
         )
 
-    def _write_run_meta(self, search_time: float, eval_time: float):
+    def _write_run_meta(self, search_time: float, eval_time: float, wall_clock_sec: float):
         best_eval_epoch = self._best_eval_metrics["eval_episode"] if self._best_eval_metrics else -1
         lines = [
             "method                     = TF-QAS",
@@ -575,6 +577,7 @@ class TFQASRunner(BaseRunner):
             f"best_eval_epoch            = {best_eval_epoch}",
             f"search_time_s              = {search_time:.1f}",
             f"primitive_eval_time_s      = {eval_time:.1f}",
+            f"wall_clock_sec             = {wall_clock_sec:.1f}",
         ]
         for key, value in self.optim_options.items():
             lines.append(f"optim_option_{key}         = {value}")

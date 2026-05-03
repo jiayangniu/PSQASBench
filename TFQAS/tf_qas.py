@@ -88,6 +88,7 @@ def run_tf_qas(
     seed: int | None = None,
     verbose: bool = True,
     n_workers: int | None = None,
+    bvqe=None,
 ) -> list[TFQASResult]:
     """
     Run the two-stage TF-QAS algorithm.
@@ -156,38 +157,52 @@ def run_tf_qas(
 
     _log(f"  kept top-{R} circuits (min path_count={candidate_paths.min()})")
 
-    # ─────────────────────────── Stage 2: expressibility (parallel) ──────────
-    _log(f"\n[TF-QAS] Stage 2 — computing expressibility for {R} circuits "
-         f"({n_workers} workers) ...")
-    t2 = time.time()
-
-    # Build worker args: each worker gets the gate list + a unique seed
+    # ─────────────────────────── Stage 2: expressibility ─────────────────────
     rng_seq = np.random.SeedSequence(seed)
     worker_seeds = rng_seq.spawn(R)
-
-    worker_args = [
-        (circ.gates, n_qubits, n_expr_samples, n_bins, int(ws.generate_state(1)[0]))
-        for circ, ws in zip(candidate_circuits, worker_seeds)
-    ]
-
-    expr_scores = [None] * R
-    completed = 0
     log_every = max(1, R // 10)
+    expr_scores = np.empty(R, dtype=np.float64)
 
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        future_to_idx = {
-            executor.submit(_expr_worker, args): i
-            for i, args in enumerate(worker_args)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            expr_scores[idx] = future.result()
-            completed += 1
-            if verbose and completed % log_every == 0:
+    if bvqe is not None:
+        # GPU path: sequential per-circuit, batched across parameter samples.
+        # Avoids ProcessPoolExecutor subprocesses and keeps all heavy compute
+        # on the same GPU used by the rest of the benchmark.
+        from .expressibility import compute_expressibility_gpu
+        _log(f"\n[TF-QAS] Stage 2 — computing expressibility for {R} circuits "
+             f"(GPU batched) ...")
+        t2 = time.time()
+        for i, (circ, ws) in enumerate(zip(candidate_circuits, worker_seeds)):
+            rng_c = np.random.default_rng(int(ws.generate_state(1)[0]))
+            expr_scores[i] = compute_expressibility_gpu(
+                circ, n_expr_samples, n_bins, rng_c, bvqe
+            )
+            if verbose and (i + 1) % log_every == 0:
                 elapsed = time.time() - t2
-                _log(f"  {completed}/{R} done  [{elapsed:.1f}s]")
-
-    expr_scores = np.array(expr_scores)
+                _log(f"  {i + 1}/{R} done  [{elapsed:.1f}s]")
+    else:
+        # CPU fallback: parallel subprocesses (original behaviour).
+        if n_workers is None:
+            n_workers = os.cpu_count() or 1
+        _log(f"\n[TF-QAS] Stage 2 — computing expressibility for {R} circuits "
+             f"({n_workers} workers, CPU) ...")
+        t2 = time.time()
+        worker_args = [
+            (circ.gates, n_qubits, n_expr_samples, n_bins, int(ws.generate_state(1)[0]))
+            for circ, ws in zip(candidate_circuits, worker_seeds)
+        ]
+        completed = 0
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            future_to_idx = {
+                executor.submit(_expr_worker, args): i
+                for i, args in enumerate(worker_args)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                expr_scores[idx] = future.result()
+                completed += 1
+                if verbose and completed % log_every == 0:
+                    elapsed = time.time() - t2
+                    _log(f"  {completed}/{R} done  [{elapsed:.1f}s]")
     t3 = time.time()
     _log(f"  expressibility: min={expr_scores.min():.4f}, max={expr_scores.max():.4f}  "
          f"[{t3-t2:.1f}s]")

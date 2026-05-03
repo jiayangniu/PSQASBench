@@ -3,6 +3,7 @@ PSQASBench top-level utilities
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 import torch
@@ -14,6 +15,18 @@ ROOT       = Path(__file__).resolve().parent
 MOL_DIR    = ROOT / "mol_data"
 CONFIG_DIR = ROOT / "configs"
 RESULT_DIR = ROOT / "results"
+
+
+def resolve_results_root(path_str: str | None = None) -> Path:
+    """Resolve the benchmark output root from CLI, env, or repo default."""
+    raw_value = path_str or os.environ.get("PSQAS_RESULTS_DIR")
+    if not raw_value:
+        return RESULT_DIR
+
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate.resolve()
 
 
 # ── Molecule registry ─────────────────────────────────────────────────────────
@@ -65,13 +78,12 @@ def redirect_output(file_path: Path):
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
-METHODS = ["crlqas", "hyrlqas", "qdarts", "tfqas", "gqe", "gqeqas"]
+METHODS = ["crlqas", "hyrlqas", "qdarts", "tfqas", "gqeqas"]
 METHOD_CONFIG_DIR = {
     "crlqas":  "crlqas",
     "hyrlqas": "hyrlqas",
     "qdarts":  "qdarts",
     "tfqas":   "tfqas",
-    "gqe":     "gqe",
     "gqeqas":  "gqe",
 }
 
@@ -106,6 +118,8 @@ def parse_args() -> dict:
                         help="Whether to save the legacy detailed summary_<seed>.npy (0/1)")
     parser.add_argument("--use-wandb", required=False, type=int, choices=[0, 1],
                         help="Whether to enable Weights & Biases logging/upload (0/1)")
+    parser.add_argument("--results-root", required=False,
+                        help="Output root for run artifacts. Defaults to $PSQAS_RESULTS_DIR or ./results")
 
     args = parser.parse_args()
     return dict(
@@ -116,6 +130,7 @@ def parse_args() -> dict:
         config=(args.config if args.config else f"{args.mol}.cfg"),
         save_summary_detailed=args.save_summary_detailed,
         use_wandb=args.use_wandb,
+        results_root=resolve_results_root(args.results_root),
     )
 
 
@@ -123,6 +138,7 @@ def parse_args() -> dict:
 
 def get_runner(method: str, config_path: Path, mol_path: Path,
                result_dir: Path, seed: int, device: torch.device,
+               mol_name: str | None = None,
                save_summary_detailed: int | None = None,
                use_wandb: int | None = None):
     if method == "crlqas":
@@ -133,6 +149,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
             result_dir,
             seed,
             device,
+            mol_name=mol_name,
             save_summary_detailed=save_summary_detailed,
             use_wandb=use_wandb,
         )
@@ -144,6 +161,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
             result_dir,
             seed,
             device,
+            mol_name=mol_name,
             save_summary_detailed=save_summary_detailed,
             use_wandb=use_wandb,
         )
@@ -159,7 +177,7 @@ def get_runner(method: str, config_path: Path, mol_path: Path,
     if method == "tfqas":
         from TFQAS import TFQASRunner
         return TFQASRunner(config_path, mol_path, result_dir, seed, device)
-    if method in {"gqe", "gqeqas"}:
+    if method == "gqeqas":
         from GQEQAS import GQERunner
         return GQERunner(config_path, mol_path, result_dir, seed, device)
     raise ValueError(f"Unknown method '{method}'. Implemented so far: {METHODS}")

@@ -94,6 +94,35 @@ class Circuit:
             return np.array([], dtype=np.float64)
         return rng.uniform(low, high, self.n_params).astype(np.float64)
 
+    def to_state_tensor(self) -> "torch.Tensor":
+        """Build a BatchedVQE-compatible state tensor (n_gates, n_qubits+6, n_qubits).
+
+        Channel layout (matches BatchedVQE.eval_batch / batch_statevectors):
+          [0 : n_qubits]           CNOT: state[layer, targ, ctrl] = 1
+          [n_qubits : n_qubits+3]  rotation type one-hot (RX=0, RY=1, RZ=2)
+          [n_qubits+3 : n_qubits+6] zero — angles are provided via angle_batch
+
+        Only supports gate_set='primitive' (rx, ry, rz, cnot).
+        Raises ValueError for two-qubit parametric gates (xx, yy, zz).
+        """
+        import torch
+        if any(g in TWO_QUBIT_GATES for g, _ in self.gates):
+            raise ValueError(
+                "to_state_tensor() only supports the primitive gate set "
+                "(rx, ry, rz, cnot).  For the paper gate set (xx, yy, zz) "
+                "use the CPU-based compute_expressibility() fallback."
+            )
+        depth = len(self.gates)
+        state = torch.zeros(max(1, depth), self.n_qubits + 6, self.n_qubits)
+        for layer, (gate_type, qubits) in enumerate(self.gates):
+            if gate_type == "cnot":
+                ctrl, targ = int(qubits[0]), int(qubits[1])
+                state[layer, targ, ctrl] = 1.0
+            else:
+                axis_0 = _NATIVE_AXIS[gate_type] - 1  # 0=rx, 1=ry, 2=rz
+                state[layer, self.n_qubits + axis_0, int(qubits[0])] = 1.0
+        return state
+
     def statevector(self, params: np.ndarray) -> np.ndarray:
         state = QuantumState(self.n_qubits)
         state.set_zero_state()

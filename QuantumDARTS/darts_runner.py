@@ -228,6 +228,7 @@ class QuantumDARTSRunner(BaseRunner):
         from .circuit import QuantumDARTSCircuit
 
         set_seed(self.seed, device=self.device)
+        run_start = time.perf_counter()
 
         print(
             f"[QuantumDARTS] n_qubits={self.n_qubits}  slots={self.n_layers}  "
@@ -297,7 +298,7 @@ class QuantumDARTSRunner(BaseRunner):
         }
 
         npz_path = self.save_result(result)
-        self._write_run_meta(t_search)
+        self._write_run_meta(t_search, time.perf_counter() - run_start)
         self._write_config_used_cfg()
         self._write_best_eval()
         self._write_discrete_eval_history()
@@ -786,7 +787,7 @@ class QuantumDARTSRunner(BaseRunner):
             encoding="utf-8",
         )
 
-    def _write_run_meta(self, t_search: float) -> None:
+    def _write_run_meta(self, t_search: float, wall_clock_sec: float) -> None:
         best_eval_epoch = self._best_eval_metrics["eval_episode"] if self._best_eval_metrics else -1
         final_argmax = self._final_argmax_rollout or {}
         lines = [
@@ -826,6 +827,7 @@ class QuantumDARTSRunner(BaseRunner):
             f"legacy_lr_finetune         = {self.lr_finetune}",
             f"best_eval_epoch            = {best_eval_epoch}",
             f"search_time_s              = {t_search:.1f}",
+            f"wall_clock_sec             = {wall_clock_sec:.1f}",
             f"final_argmax_error_mha     = {float(final_argmax.get('energy_error', float('nan'))) * 1000.0:.6f}",
             f"final_argmax_depth         = {int(final_argmax.get('steps', -1))}",
             f"final_argmax_feasible      = {int(bool(final_argmax.get('feasible', False)))}",

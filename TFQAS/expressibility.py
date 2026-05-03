@@ -87,3 +87,65 @@ def compute_expressibility(
     kl_div = float(np.sum(p_circuit * np.log(p_circuit / p_haar)))
 
     return -kl_div  # ε = -D_KL, higher is better
+
+
+def compute_expressibility_gpu(
+    circuit: Circuit,
+    n_samples: int,
+    n_bins: int,
+    rng: np.random.Generator,
+    bvqe,
+) -> float:
+    """GPU-batched expressibility using BatchedVQE.batch_statevectors.
+
+    Computes the same ε = -D_KL(P_circuit ‖ P_Haar) as compute_expressibility
+    but runs the 2*n_samples statevector simulations as a single batched GPU
+    kernel instead of n_samples sequential qulacs CPU calls.
+
+    Only supports gate_set='primitive' (rx, ry, rz, cnot).  Automatically
+    falls back to the CPU path for circuits with two-qubit parametric gates.
+
+    Args:
+        circuit:  Circuit template (primitive gate set)
+        n_samples: number of random (θ, φ) pairs to sample
+        n_bins:    histogram bins for the KL divergence estimate
+        rng:       numpy random generator (for reproducibility)
+        bvqe:      BatchedVQE instance — provides device and batch_statevectors
+    """
+    import torch
+
+    N = 1 << bvqe.n
+
+    if circuit.n_params == 0:
+        overlaps = np.ones(n_samples, dtype=np.float64)
+    else:
+        try:
+            state_tensor = circuit.to_state_tensor()
+        except ValueError:
+            # paper gate set (xx/yy/zz): fall back to CPU
+            return compute_expressibility(circuit, n_samples=n_samples, n_bins=n_bins, rng=rng)
+
+        all_params = rng.uniform(
+            -np.pi, np.pi, size=(2 * n_samples, circuit.n_params)
+        ).astype(np.float32)
+        params_t = torch.tensor(all_params, dtype=torch.float32, device=bvqe.device)
+
+        with torch.no_grad():
+            sv_all = bvqe.batch_statevectors(state_tensor, params_t)   # (2S, 2^n)
+
+        sv_a = sv_all[:n_samples]   # (S, 2^n)
+        sv_b = sv_all[n_samples:]   # (S, 2^n)
+        overlaps = (
+            torch.sum(sv_a.conj() * sv_b, dim=1).abs().pow(2)
+            .float().cpu().numpy().astype(np.float64)
+        )
+
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_width = 1.0 / n_bins
+    hist, _ = np.histogram(overlaps, bins=bins)
+    p_circuit = hist.astype(float) + 1e-10
+    p_circuit /= p_circuit.sum()
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+    p_haar = (N - 1) * (1 - bin_centers) ** (N - 2) * bin_width + 1e-10
+    p_haar /= p_haar.sum()
+    return -float(np.sum(p_circuit * np.log(p_circuit / p_haar)))
