@@ -126,6 +126,10 @@ def parse_episode_traces(traces_path: Path) -> list[dict]:
             .replace("true", "True")
             .replace("false", "False")
         )
+        # ast.literal_eval cannot handle bare `nan` (a Python name, not a literal).
+        # Replace word-boundary nan with None so the snapshot dict can be parsed;
+        # the predicted_energy_ha field is not used by the tool.
+        normalized = re.sub(r'\bnan\b', 'None', normalized)
         current[key] = ast.literal_eval(normalized)
 
     if current is not None:

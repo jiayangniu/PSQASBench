@@ -36,3 +36,5 @@ optimizer_nohup_logs/
 # Intermediate analysis outputs
 gate_bias_analysis/
 critical_structure_analysis_old/
+figure/
+.codex

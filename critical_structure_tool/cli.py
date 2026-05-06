@@ -132,6 +132,16 @@ def parse_args() -> argparse.Namespace:
         help="Beam-search top-k: how many deletion candidates to expand per state. Default: 3.",
     )
     parser.add_argument(
+        "--branch-selection",
+        choices=["topk", "sample"],
+        default="topk",
+        help=(
+            "How to choose deletion candidates from the fixed prior at each beam state. "
+            "topk: deterministic lowest-cost gates; sample: softmax sample without replacement "
+            "using --sampling-temperature-mha. Default: topk."
+        ),
+    )
+    parser.add_argument(
         "--prune-budget",
         type=int,
         default=1000,
@@ -590,6 +600,7 @@ def main() -> int:
             protected_gate_signatures=protected_gate_signatures,
             beam_width=args.beam_width,
             branching_factor=args.branching_factor,
+            branch_selection=args.branch_selection,
             max_prune_steps=effective_max_prune_steps,
             temperature_mha=args.sampling_temperature_mha,
             protected_penalty=args.protected_penalty,
@@ -731,6 +742,9 @@ def main() -> int:
         f"anchor_top_k = {args.anchor_top_k}",
         f"beam_width = {args.beam_width}",
         f"branching_factor = {args.branching_factor}",
+        f"branch_selection = {args.branch_selection}",
+        f"sampling_temperature_mha = {args.sampling_temperature_mha}",
+        f"protected_penalty = {args.protected_penalty}",
         f"max_prune_steps_override = {args.max_prune_steps if args.max_prune_steps is not None else 'auto'}",
         f"prune_budget = {args.prune_budget}",
         f"reconstruction_slack_mha = {args.reconstruction_slack_mha}",

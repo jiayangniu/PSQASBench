@@ -78,30 +78,30 @@ This only prints and saves the event-error distribution and bucket summary.
 
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
-  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10 \
   --mode list \
-  --out-dir critical_structure_analysis/l1_beh2_buckets
+  --out-dir critical_structure_analysis/t1_beh2_buckets
 ```
 
 ### Example: Analyze A Selected Bucket
 
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
-  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10 \
   --mode analyze \
   --bucket 0.55 \
   --select-n 6 \
   --beam-width 4 \
   --branching-factor 3 \
   --prune-budget 1000 \
-  --out-dir critical_structure_analysis/l1_beh2_cobyla_d10_bucket055
+  --out-dir critical_structure_analysis/t1_beh2_cobyla_d10_bucket055
 ```
 
 ### Example: Heavier 8-Qubit Case
 
 ```bash
 conda run -n crlqas_env python analyze_critical_structure.py \
-  results/crlqas/L3_CH2_Singlet_8q/LevelCheck_EXP/L3_CH2_Singlet_8q_rotosolve_s2_check \
+  results/crlqas/T2_CH2_8q/LevelCheck_EXP/T2_CH2_8q_rotosolve_s2_check \
   --mode analyze \
   --bucket 0.00 \
   --select-n 4 \
@@ -109,7 +109,7 @@ conda run -n crlqas_env python analyze_critical_structure.py \
   --branching-factor 3 \
   --prune-budget 300 \
   --reconstruction-slack-mha 0.5 \
-  --out-dir critical_structure_analysis/l3_ch2_8q_bucket000_main
+  --out-dir critical_structure_analysis/t2_ch2_8q_bucket000_main
 ```
 
 ## Key Hyperparameters
@@ -190,10 +190,20 @@ Only the most important knobs are listed here.
   Number of beam states kept after each expansion step.
 
 - `--branching-factor`
-  Here this should be interpreted as `top-k`.
-  For each beam state, the tool expands using the top-k deletion candidates under the fixed deletion prior.
-  The intended default design is:
-  - `top-k = 3`
+  Number of deletion candidates expanded per beam state.
+  Under `--branch-selection topk`, this is the deterministic top-k under the fixed deletion prior.
+  Under `--branch-selection sample`, this is the number of candidates drawn without replacement
+  from a softmax over the fixed deletion prior.
+
+- `--branch-selection`
+  - `topk`
+    Deterministic beam expansion using the lowest-cost deletion candidates.
+  - `sample`
+    Softmax sampling without replacement from the deletion prior.
+
+- `--sampling-temperature-mha`
+  Softmax temperature used when `--branch-selection sample`.
+  Smaller values make sampling greedier; non-positive values fall back to deterministic top-k.
 
 - `--prune-budget`
   Total pruning budget for one episode.
@@ -408,9 +418,9 @@ This is the final output used to judge whether a success regime corresponds to a
 
 The biggest unresolved problem is **reconstruction fidelity on harder systems**.
 
-For easy systems such as `L1_BeH2_STO3G_6q`, the reconstructed baseline can still remain close to the trace-recorded low-error regime, so the retained structures are often interpretable.
+For easy systems such as `T1_BeH2_STO3G_6q`, the reconstructed baseline can still remain close to the trace-recorded low-error regime, so the retained structures are often interpretable.
 
-For harder cases such as `L3_CH2_Singlet_8q`, this often breaks:
+For harder cases such as `T2_CH2_8q`, this often breaks:
 
 - the trace may record a saved event in the `0.00 mHa` bucket,
 - but after reconstructing the same action prefix and re-optimizing it from scratch, the tool may land in a completely different basin,

@@ -3,6 +3,7 @@ HyRLQAS runner for PSQASBench.
 Supports both Hybrid_REINFORCE and RENEW variants via config.
 """
 
+import os
 from pathlib import Path
 import time
 
@@ -51,7 +52,7 @@ class HyRLQASRunner(BaseRunner):
         if use_wandb is not None:
             self.conf.setdefault("general", {})["use_wandb"] = int(use_wandb)
         self.save_summary_detailed = bool(int(self.conf.get("general", {}).get("save_summary_detailed", 0)))
-        self.use_wandb = bool(int(self.conf.get("general", {}).get("use_wandb", 1)))
+        self.use_wandb = bool(int(self.conf.get("general", {}).get("use_wandb", 0)))
         self.runtime_overrides = {}
         if save_summary_detailed is not None:
             self.runtime_overrides["save_summary_detailed"] = int(save_summary_detailed)
@@ -80,6 +81,22 @@ class HyRLQASRunner(BaseRunner):
             if s in {"0", "false", "no", "n", "off"}:
                 return False
         return bool(v)
+
+    def _wandb_init(self, run_name: str, group: str, config_dict: dict):
+        general = self.conf.get("general", {})
+        project = os.environ.get("WANDB_PROJECT") or general.get("wandb_project") or "PSQASBench"
+        entity = os.environ.get("WANDB_ENTITY") or general.get("wandb_entity") or ""
+
+        kwargs = dict(
+            project=project,
+            name=run_name,
+            group=group,
+            mode=("online" if self.use_wandb else "disabled"),
+            config=config_dict,
+        )
+        if str(entity).strip():
+            kwargs["entity"] = str(entity).strip()
+        wandb.init(**kwargs)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -419,13 +436,10 @@ class HyRLQASRunner(BaseRunner):
         _run_name  = f"{method_tag}_{_mol_short}_{_optim}_{_device}_seed{self.seed}"
         _group     = f"{method_tag}_{_mol_short}_{_optim}_{_device}"
 
-        wandb.init(
-            project="PSQASBench",
-            entity="jiayangniu14-rmit-university",
-            name=_run_name,
-            group=_group,
-            mode=("online" if self.use_wandb else "disabled"),
-            config={**self.conf, "config_name": self.config_path.name},
+        self._wandb_init(
+            _run_name,
+            _group,
+            {**self.conf, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
         wandb.define_metric("episode")
@@ -558,13 +572,10 @@ class HyRLQASRunner(BaseRunner):
         _run_name  = f"{method_tag}_{_mol_short}_{_optim}_{_device}_seed{self.seed}"
         _group     = f"{method_tag}_{_mol_short}_{_optim}_{_device}"
 
-        wandb.init(
-            project="PSQASBench",
-            entity="jiayangniu14-rmit-university",
-            name=_run_name,
-            group=_group,
-            mode=("online" if self.use_wandb else "disabled"),
-            config={**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
+        self._wandb_init(
+            _run_name,
+            _group,
+            {**self.conf, "num_parallel_envs": K, "config_name": self.config_path.name},
         )
         self._bind_wandb_run()
         wandb.define_metric("episode")

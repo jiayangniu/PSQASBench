@@ -3,7 +3,7 @@
 **Pauli String Quantum Architecture Search Benchmark**
 
 A unified benchmarking framework for Reinforcement Learning–based Quantum Architecture Search (QAS).
-PSQASBench exposes systematic flaws in existing RL-for-QAS methods through a standardised 6-tier molecular test suite, unified evaluation metrics, and reproducible experimental protocols.
+PSQASBench exposes systematic flaws in existing RL-for-QAS methods through a standardized 5-tier molecular test suite, unified evaluation metrics, and reproducible experimental protocols.
 
 ---
 
@@ -11,27 +11,32 @@ PSQASBench exposes systematic flaws in existing RL-for-QAS methods through a sta
 
 Current QAS papers use different molecules, different circuit-quality metrics, and inconsistent checkpoint selection strategies — making cross-method comparison meaningless.  PSQASBench fixes this by providing:
 
-- **One molecular test suite** covering 6 diagnostic tiers (L1–L6)
+- **One molecular test suite** covering the finalized 5-tier benchmark suite (T1–T5)
 - **One evaluation protocol** with shared SR, CNOT@chem, D\_struct, D\_func metrics
 - **One runner interface** so every method runs through the same `main.py` entry point
 - **One post-hoc structure analysis tool** (`critical_structure_tool`) for diagnosing what circuit motifs RL methods actually learn
 
 ---
 
-## Molecular Test Suite (6-Tier Diagnostic)
+## Molecular Test Suite (Final 5-Tier Benchmark)
 
-All Hamiltonians are Jordan-Wigner encoded and stored in `mol_data/` as `.npz` files containing `hamiltonian`, `weights`, `eigvals`, and `energy_shift`.  Chemical accuracy threshold: **1.6 mHa**.
+All Hamiltonians are Jordan-Wigner encoded and stored in `mol_data/` as `.npz` files containing `hamiltonian`, `weights`, `eigvals`, and `energy_shift`. Chemical accuracy threshold: **1.6 mHa**.
 
-| Tier | Difficulty Source | Molecules | Qubits | Diagnostic Target |
-|------|------------------|-----------|--------|-------------------|
-| L1 | Basic optimisation | H₂ (equil.), BH, BeH₂ (STO-3G) | 4, 6, 6 | **Minimalism** — can the policy prune redundant gates? |
-| L2 | Asymmetry / interaction hubs | BeH⁺, LiH (equil.), BF | 4, 6, 8 | **Asymmetry** — non-uniform qubit importance |
-| L3 | Near-degenerate (small gap) | HeH⁺, CH₂, LiH (stretch), H₃ (triangle) | 4, 6–8, 6, 6 | **Stability** — flat landscape with ΔE ≈ 0 |
-| L4 | Strong correlation | H₂ (stretch), H₃ (linear), H₂O | 4, 6, 8 | **Representation** — high-order Pauli terms dominate |
-| L5 | Topology routing | H₃ (linear), H₄ (chain) | 6, 8 | **Topology** — 1D nearest-neighbour connectivity constraint |
-| L6 | Scalability | BeH₂ (basis-set ladder: STO-3G → 6-311G) | 6–14 | **Scalability** — exponential action-space growth |
+| Tier | Molecule | q | r_Z | r_>=2 | G1 | G2 | Gap (mHa) | S(q) |
+|------|----------|---|-----|-------|----|----|-----------|------|
+| T1 | BeH2_STO3G | 6 | 0.978 | 0.593 | 0.969 | 0.094 | 212 | `[.008,.008,.005,.005,.005,.005]` |
+| T1 | LiH_Equil | 6 | 0.876 | 0.654 | 0.891 | 0.225 | 77 | `[.018,.018,.006,.006,.013,.013]` |
+| T2 | CH2 | 8 | 0.907 | 0.483 | 0.945 | 0.210 | 0 (3-fold) | `[.004,.004,.004,.070,.000,.000,.000,.068]` |
+| T3 | H2_Stretch | 4 | 0.728 | 0.849 | 0.750 | 0.180 | 4 | `[.974,.974,.974,.974]` |
+| T3 | H2O_StrongCorr | 8 | 0.723 | 0.887 | 0.648 | 0.074 | 94 | `[.021,.021,.342,.342,.316,.316,.071,.071]` |
+| T3 | H4_Chain | 8 | 0.599 | 0.809 | 0.418 | 0.011 | 233 | `[.124,.124,.274,.274,.284,.284,.109,.109]` |
+| T4 | H3_Linear | 6 | 0.709 | 0.765 | 0.656 | 0.021 | 0 (2-fold) | `[.202,.139,.147,.147,.083,.245]` |
+| T5 | BeH2_631G | 8 | 0.953 | 0.560 | 0.980 | 0.046 | 90 | `[.024,.024,.002,.002,.002,.002,.021,.021]` |
+| T5 | BeH2_6311G | 10 | 0.923 | 0.533 | 0.963 | 0.010 | 63 | `[.011,.011,.001,.001,.001,.001,.008,.008,.002,.002]` |
+| T5 | BeH2_CCPVDZ | 12 | 0.889 | 0.498 | 0.904 | 0.019 | 68 | `[.022,.022,.002,.002,.002,.002,.012,.012,.003,.003,.008,.008]` |
+| T5 | BeH2_CCPVDZ | 14 | 0.767 | 0.700 | 0.621 | 0.000 | 61 | `[.039,.039,.023,.023,.014,.014,.014,.014,.018,.018,.009,.009,.016,.016]` |
 
-> **L5 note:** action space is restricted to nearest-neighbour entangling gates; all circuits must respect 1D linear connectivity.  Config files for L5 must set `connectivity = linear` under `[env]`.
+> **T4 note:** the `H3_Linear` benchmark uses nearest-neighbour connectivity. Its configs must set `connectivity = linear` under `[env]`.
 
 ---
 
@@ -197,40 +202,40 @@ python -c "from qulacs import QuantumStateGpu; print('GPU qulacs OK')"
 cd PSQASBench
 conda activate crlqas_env
 
-# CRLQAS on L1 H2, CPU
-python main.py --method crlqas --mol L1_H2_Equil_4q --seed 11111 --device cpu
+# CRLQAS on T1 BeH2, CPU
+python main.py --method crlqas --mol T1_BeH2_STO3G_6q --seed 11111 --device cpu
 
-# CRLQAS on L6 BeH2 14q, GPU, parallel envs
-python main.py --method crlqas --mol L6_BeH2_CCPVDZ_14q --seed 11111 --device cuda:0
+# CRLQAS on T5 BeH2 cc-pVDZ 14q, GPU, parallel envs
+python main.py --method crlqas --mol T5_BeH2_CCPVDZ_14q --seed 11111 --device cuda:0
 
-# HyRLQAS (RENEW) on L2 LiH
-python main.py --method hyrlqas --mol L2_LiH_Equil_6q --seed 11111 --device cuda:0
+# HyRLQAS (RENEW) on T1 LiH
+python main.py --method hyrlqas --mol T1_LiH_Equil_6q --seed 11111 --device cuda:0
 
 # Override config explicitly
-python main.py --method crlqas --mol L6_BeH2_CCPVDZ_14q \
-               --config bench_14q_rotosolve_gpu_k10.cfg --seed 11111 --device cuda:0
+python main.py --method crlqas --mol T5_BeH2_CCPVDZ_14q \
+               --config Optimizer_EXP/bench_14q_rotosolve_gpu_k10.cfg --seed 11111 --device cuda:0
 
 # Configs can live in subdirectories under configs/<method>/
-python main.py --method crlqas --mol L1_BeH2_STO3G_6q \
-               --config Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10.cfg \
+python main.py --method crlqas --mol T1_BeH2_STO3G_6q \
+               --config Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10.cfg \
                --seed 11111 --device cuda:0 --use-wandb 0
 
-# QuantumDARTS on L1 BeH2
-python main.py --method qdarts --mol L1_BeH2_STO3G_6q --seed 11111 --device cuda:0
+# QuantumDARTS on T1 BeH2
+python main.py --method qdarts --mol T1_BeH2_STO3G_6q --seed 11111 --device cuda:0
 
-# GQEQAS on L1 BeH2 (depth10 reference config)
-python main.py --method gqeqas --mol L1_BeH2_STO3G_6q \
-               --config Formal_EXP/L1_BeH2_STO3G_6q_depth10.cfg \
+# GQEQAS on T1 BeH2 (depth10 reference config)
+python main.py --method gqeqas --mol T1_BeH2_STO3G_6q \
+               --config Formal_EXP/T1_BeH2_STO3G_6q_depth10.cfg \
                --seed 11111 --device cuda:1
 
-# GQEQAS on L2 LiH
-python main.py --method gqeqas --mol L2_LiH_Equil_6q \
-               --config Formal_EXP/L2_LiH_Equil_6q.cfg \
+# GQEQAS on T1 LiH
+python main.py --method gqeqas --mol T1_LiH_Equil_6q \
+               --config Formal_EXP/T1_LiH_Equil_6q_depth50.cfg \
                --seed 11111 --device cuda:1
 
-# GQEQAS on L6 BeH2 14q (large, Rotosolve)
-python main.py --method gqeqas --mol L6_BeH2_CCPVDZ_14q \
-               --config Formal_EXP/L6_BeH2_CCPVDZ_14q.cfg \
+# GQEQAS on T5 BeH2 14q (large, Rotosolve)
+python main.py --method gqeqas --mol T5_BeH2_CCPVDZ_14q \
+               --config Formal_EXP/T5_BeH2_CCPVDZ_14q.cfg \
                --seed 11111 --device cuda:3
 ```
 
@@ -243,7 +248,7 @@ results/<method>/<mol>/<config_path_without_suffix>/seed<seed>/
 Example:
 
 ```text
-results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10/seed11111/
+results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10/seed11111/
 ```
 
 ---
@@ -255,8 +260,8 @@ results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10/seed11
 ```bash
 python main.py \
   --method crlqas \
-  --mol L1_BeH2_STO3G_6q \
-  --config Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10.cfg \
+  --mol T1_BeH2_STO3G_6q \
+  --config Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10.cfg \
   --seed 11111 \
   --device cuda:0 \
   --use-wandb 0 \
@@ -270,8 +275,10 @@ Commonly changed flags:
 - `--config`: config file relative to `configs/<method>/`
 - `--seed`: random seed; creates a separate `seed<seed>` result directory
 - `--device`: `cpu`, `cuda:0`, `cuda:1`, ...
-- `--use-wandb 0`: disable Weights & Biases upload
+- `--use-wandb 0`: disable Weights & Biases upload; benchmark runs default to `0`
 - `--save-summary-detailed 1`: additionally save legacy `summary_<seed>.npy`
+
+If you do enable W&B logging, `WANDB_ENTITY` and `WANDB_PROJECT` can be used to route runs to your own workspace without editing the code.
 
 ### Config fields most often edited
 
@@ -287,7 +294,7 @@ save_every = 500
 [env]
 num_layers = 20
 accept_err = 0.0016
-connectivity = linear    # required for L5 experiments only
+connectivity = linear    # required for T4_H3_Linear only
 
 [non_local_opt]
 optim_alg = COBYLA
@@ -302,7 +309,7 @@ What they control:
 - `general.num_parallel_envs`: parallel environments for training
 - `env.num_layers`: maximum circuit depth (= maximum episode steps)
 - `env.accept_err`: success threshold in Hartree
-- `env.connectivity`: `all` (default) or `linear`; must be `linear` for L5 experiments
+- `env.connectivity`: `all` (default) or `linear`; `T4_H3_Linear_6q` requires `linear`
 - `non_local_opt.optim_alg`: local angle optimizer (`COBYLA`, `Rotosolve`, `SPSA`, `AdamSPSA`, `PSRAdam`)
 - `non_local_opt.global_iters`: optimizer budget for `COBYLA`, `SPSA`, `AdamSPSA`, `PSRAdam`
 - `non_local_opt.rotosolve_sweeps`: sweep count for `Rotosolve`
@@ -319,7 +326,7 @@ episodes = 10000          # total training episodes
 eval_every = 1000         # periodic eval interval
 eval_K = 20               # rollouts per eval
 num_parallel_envs = 10    # 1 = single-env, >1 = parallel training
-use_wandb = 1             # 0 = disable wandb upload
+use_wandb = 0             # benchmark default; set to 1 to enable wandb upload
 log_every = 10
 save_every = 200
 
@@ -352,7 +359,7 @@ accept_err = 0.0016               # chemical accuracy threshold (Ha)
 analysis_save_threshold = 0.0016  # save circuit snapshots below this energy error
 active_electrons = 2              # active-space electrons (must match .npz generation)
 active_orbitals = 3               # active-space orbitals (= num_qubits // 2 by default)
-connectivity = all                # all | linear (linear required for L5)
+connectivity = all                # all | linear (T4_H3_Linear uses linear)
 
 [operator_pool]
 pool_kind = primitive             # primitive | ucc
@@ -536,7 +543,7 @@ For `TFQAS` and `QuantumDARTS`, the tool analyzes serialized candidate/final cir
 
 ### Warm-start reconstruction
 
-When `episode_traces.txt` contains parameterized `analysis_snapshots` (produced by runs after the snapshot-logging change), the tool uses the saved optimised angles as the starting point for circuit reconstruction.  This substantially improves reconstruction fidelity for near-degenerate systems (L3) where cold-start re-optimisation from angle=0 typically falls into a different basin.
+When `episode_traces.txt` contains parameterized `analysis_snapshots` (produced by runs after the snapshot-logging change), the tool uses the saved optimised angles as the starting point for circuit reconstruction. This substantially improves reconstruction fidelity for branch-sensitive and near-degenerate cases such as `T2_CH2_8q`, where cold-start re-optimisation from angle = 0 can fall into a different basin.
 
 For **old result files** without `analysis_snapshots`, the tool falls back to legacy `first_hit_snapshot` if present, and otherwise to cold-start reconstruction (all angles initialised to 0).
 
@@ -549,34 +556,34 @@ cd PSQASBench
 conda activate crlqas_env
 
 # Interactive: prints bucket summary and prompts for selection
-python analyze_critical_structure.py results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10
+python analyze_critical_structure.py results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10
 
 # Direct bucket selection
 python analyze_critical_structure.py \
-  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
+  results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10 \
   --bucket 0.55 \
   --select-n 6 \
   --beam-width 4 \
   --branching-factor 3 \
   --prune-budget 1000 \
-  --out-dir critical_structure_analysis/l1_beh2_cobyla_d10_bucket055
+  --out-dir critical_structure_analysis/t1_beh2_cobyla_d10_bucket055
 
 # Harder 8-qubit case — larger slack, smaller budget
 python analyze_critical_structure.py \
-  results/crlqas/L3_CH2_Singlet_8q/LevelCheck_EXP/L3_CH2_Singlet_8q_rotosolve_s2_check \
+  results/crlqas/T2_CH2_8q/LevelCheck_EXP/T2_CH2_8q_rotosolve_s2_check \
   --bucket 0.00 \
   --select-n 4 \
   --beam-width 4 \
   --branching-factor 3 \
   --prune-budget 300 \
   --reconstruction-slack-mha 0.5 \
-  --out-dir critical_structure_analysis/l3_ch2_8q_bucket000
+  --out-dir critical_structure_analysis/t2_ch2_8q_bucket000
 
 # Multiple run directories (multi-seed analysis)
 python analyze_critical_structure.py \
-  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10 \
-  results/crlqas/L1_BeH2_STO3G_6q/Depth_EXP/L1_BeH2_STO3G_6q_cobyla_depth10_seed2 \
-  --bucket 0.55 --select-n 10 --out-dir critical_structure_analysis/l1_beh2_multiseed
+  results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10 \
+  results/crlqas/T1_BeH2_STO3G_6q/Depth_EXP/T1_BeH2_STO3G_6q_cobyla_depth10_seed2 \
+  --bucket 0.55 --select-n 10 --out-dir critical_structure_analysis/t1_beh2_multiseed
 ```
 
 Equivalent module entrypoint: `python -m critical_structure_tool <args...>`
@@ -598,7 +605,7 @@ Equivalent module entrypoint: `python -m critical_structure_tool <args...>`
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--bucket-slack-mha` | 0.05 | allowed error above bucket center during pruning |
-| `--reconstruction-slack-mha` | 0.3 | extra slack when reconstructed baseline differs from trace; increase for L3+ |
+| `--reconstruction-slack-mha` | 0.3 | extra slack when reconstructed baseline differs from trace; increase for branch-sensitive cases such as `T2_CH2_8q` |
 | `--delta-tolerance-mha` | 0.2 | maximum single-step error increase for a gate to be deletable |
 
 **Pruning budget**
@@ -642,7 +649,7 @@ All outputs are written under `--out-dir` (default: `critical_structure_analysis
 
 **Common retained gate signatures** — gates present in all pruned episodes (exact set intersection).  `none` does not mean no pattern exists; it often indicates consistent qubit-level patterns that the exact-match test misses (use the individual `summary.md` to inspect manually).
 
-**Reconstruction baseline >> target error** — indicates warm-start failure (cold-start landed in wrong basin).  Increase `--reconstruction-slack-mha`, check that `analysis_snapshots` or legacy `first_hit_snapshot` is present in traces, or treat that episode as unusable.  This is expected for L3 near-degenerate molecules with old result files.
+**Reconstruction baseline >> target error** — indicates warm-start failure (cold-start landed in the wrong basin). Increase `--reconstruction-slack-mha`, check that `analysis_snapshots` or legacy `first_hit_snapshot` is present in traces, or treat that episode as unusable. This is most common for branch-sensitive cases such as `T2_CH2_8q`, especially with old result files.
 
 ---
 
@@ -716,7 +723,7 @@ PSQASBench/
 ├── critical_structure_tool/       # post-hoc critical circuit structure analysis
 │   ├── cli.py                     # main entry point and argument parser
 │   ├── circuit_utils.py           # gate construction, qulacs evaluation, optimizers
-│   ├── pruning.py                 # gate importance + probabilistic beam pruning
+│   ├── pruning.py                 # gate importance + top-k / softmax-sampling beam pruning
 │   ├── io_utils.py                # trace parsing, config reading, episode record construction
 │   └── types.py                   # RunContext, SnapshotRecord, GateSpec, BranchState
 │
@@ -728,9 +735,9 @@ PSQASBench/
 │   ├── qdarts/                    # .cfg files for QuantumDARTS experiments
 │   ├── tfqas/                     # .cfg files for TFQAS experiments
 │   └── gqe/                       # .cfg files for GQEQAS experiments
-│       └── Formal_EXP/            # standard benchmark sweep configs (L1–L6)
+│       └── Formal_EXP/            # standard benchmark sweep configs (T1–T5)
 │
-├── mol_data/                      # pre-computed .npz Hamiltonians (Jordan-Wigner, 29 files)
+├── mol_data/                      # pre-computed .npz Hamiltonians for the benchmark molecules
 ├── mol_gen/                       # scripts to (re-)generate Hamiltonians and fingerprints
 └── results/                       # training run outputs (gitignored data files)
 ```
@@ -749,4 +756,4 @@ These are documented as findings; fixes are noted where planned:
 
 4. **Curriculum Threshold Sensitivity** — The initial `accept_err` and tightening schedule affect convergence significantly but are rarely ablated.  Isolated via the LevelCheck experiment group in `configs/crlqas/LevelCheck_EXP/`.
 
-5. **Reconstruction Fidelity (L3+)** — RLQAS circuits for near-degenerate molecules depend on specific angle trajectories accumulated during training.  Cold-start reconstruction in post-hoc analysis fails for many L3 episodes.  Partially addressed by the `analysis_snapshots` trace format (with legacy `first_hit_snapshot` fallback), which requires re-running experiments to populate for old runs.
+5. **Reconstruction Fidelity (Hard Branch-Sensitive Cases)** — RLQAS circuits for branch-sensitive molecules, most notably `T2_CH2_8q`, can depend on specific angle trajectories accumulated during training. Cold-start reconstruction in post-hoc analysis may fail for some harder-bucket episodes. This is partially addressed by the `analysis_snapshots` trace format (with legacy `first_hit_snapshot` fallback), which requires re-running experiments to populate for old runs.

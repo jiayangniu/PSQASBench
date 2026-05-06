@@ -148,12 +148,12 @@ B_soft_proxy ≈ B_soft_qdarts × n_slots × avg_candidate_count
 
 下面用两个代表分子来判断“当前设置是否处于合理量级”：
 
-- `6q`: `L2_LiH_Equil_6q`
-- `8q`: `L3_CH2_Singlet_8q`
+- `6q`: `T1_LiH_Equil_6q`
+- `8q`: `T2_CH2_8q`
 
 这些数字是为了看量级，不追求伪精确。
 
-### 3.1 `L2_LiH_Equil_6q`
+### 3.1 `T1_LiH_Equil_6q`
 
 当前仓库配置（以 `configs/...` 文件为准，不以已启动任务的历史日志为准）：
 
@@ -177,7 +177,7 @@ B_soft_proxy ≈ B_soft_qdarts × n_slots × avg_candidate_count
 - `GQEQAS` 仍然偏低，但方向上比之前更接近 benchmark 主体
 - `QDARTS` 即便把 `n_epochs` 砍半，soft-search 代理预算依然不小，只是语义上不能和其他方法直接等价
 
-### 3.2 `L3_CH2_Singlet_8q`
+### 3.2 `T2_CH2_8q`
 
 当前仓库配置（以 `configs/...` 文件为准，不以已启动任务的历史日志为准）：
 
@@ -220,7 +220,7 @@ B_soft_proxy ≈ B_soft_qdarts × n_slots × avg_candidate_count
 - 它把 `QDARTS overhead_factor` 直接写成预算，这更像 proxy，而不是可与离散 H-oracle 等价的真实计数
 - 它低估了 `GQEQAS` 的 prefix-energy 成本，同时也没有把 replay 对 fresh budget 的削减写清楚
 - 它记录的很多具体配置数值已经与当前 `Formal_EXP` 不一致
-- 它写到 “GQE 无 L5 Formal_EXP 配置” 也已经过时；现在 `L5_H3_Linear_6q` 和 `L5_H4_Chain_8q`
+- 它写到 “GQE 在较难 Formal_EXP 分子上没有对应配置” 也已经过时；现在 `T4_H3_Linear_6q` 和 `T3_H4_Chain_8q`
   的 `GQEQAS` 配置都已补上
 
 ---

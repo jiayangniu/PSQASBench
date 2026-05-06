@@ -76,6 +76,38 @@ def _candidate_rank_cost(delta_error_mha: float, is_anchor: bool, protected_pena
     return base
 
 
+def _sample_gate_indices_softmax(
+    ranked_gate_indices: list[tuple[float, int, GateSpec]],
+    top_k: int,
+    temperature_mha: float,
+    rng: np.random.Generator,
+) -> list[int]:
+    if not ranked_gate_indices:
+        return []
+
+    if temperature_mha <= 0:
+        return [gate_index for _, gate_index, _ in ranked_gate_indices[:top_k]]
+
+    remaining = list(ranked_gate_indices)
+    selected: list[int] = []
+    k = min(max(1, int(top_k)), len(remaining))
+
+    for _ in range(k):
+        costs = np.array([float(cost) for cost, _, _ in remaining], dtype=float)
+        logits = -costs / float(temperature_mha)
+        logits -= np.max(logits)
+        weights = np.exp(logits)
+        weight_sum = float(np.sum(weights))
+        if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+            selected.append(remaining.pop(0)[1])
+            continue
+        probs = weights / weight_sum
+        chosen_pos = int(rng.choice(len(remaining), p=probs))
+        selected.append(remaining.pop(chosen_pos)[1])
+
+    return selected
+
+
 def probabilistic_beam_prune(
     baseline_gates: list[GateSpec],
     baseline_error_mha: float,
@@ -89,6 +121,7 @@ def probabilistic_beam_prune(
     protected_gate_signatures: set[str],
     beam_width: int,
     branching_factor: int,
+    branch_selection: str,
     max_prune_steps: int,
     temperature_mha: float,
     protected_penalty: float,
@@ -134,7 +167,15 @@ def probabilistic_beam_prune(
             ranked_gate_indices.sort(key=lambda item: (item[0], item[2].step_index, item[2].action_id))
 
             top_k = max(1, int(branching_factor))
-            candidate_indices = [gate_index for _, gate_index, _ in ranked_gate_indices[:top_k]]
+            if str(branch_selection).lower() == "sample":
+                candidate_indices = _sample_gate_indices_softmax(
+                    ranked_gate_indices,
+                    top_k,
+                    temperature_mha,
+                    rng,
+                )
+            else:
+                candidate_indices = [gate_index for _, gate_index, _ in ranked_gate_indices[:top_k]]
 
             viable_children: list[BranchState] = []
             for gate_index in candidate_indices:
