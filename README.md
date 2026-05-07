@@ -20,7 +20,7 @@ Current QAS papers use different molecules, different circuit-quality metrics, a
 
 ## Molecular Test Suite (Final 5-Tier Benchmark)
 
-All Hamiltonians are Jordan-Wigner encoded and stored in `mol_data/` as `.npz` files containing `hamiltonian`, `weights`, `eigvals`, and `energy_shift`. Chemical accuracy threshold: **1.6 mHa**.
+All Hamiltonians are Jordan-Wigner encoded and stored in `mol_data/` as `.npz` files containing `hamiltonian`, `weights`, `eigvals`, `energy_shift`, plus provenance metadata: `active_electrons`, `active_orbitals`, `basis`, `n_qubits`. Chemical accuracy threshold: **1.6 mHa**.
 
 | Tier | Molecule | q | r_Z | r_>=2 | G1 | G2 | Gap (mHa) | S(q) |
 |------|----------|---|-----|-------|----|----|-----------|------|

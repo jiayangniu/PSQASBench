@@ -23,6 +23,8 @@ wandb/
 
 # Local run scripts
 run_*.sh
+prepare_formal_results_aliases.sh
+rename_results_to_formal.sh
 
 # Analysis outputs (data, not code)
 critical_structure_analysis/
